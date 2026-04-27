@@ -1,0 +1,24 @@
+[pipeline]
+run_mode = "deidentification" # full | sam3 | postprocess | deidentification | report
+
+input_path = "imgs/output/postprocess/crops"
+output_json = "imgs/output/results.json"
+artifacts_dir = "imgs/output/"
+save_artifacts = true # set to false in production to skip intermediate image files
+prompt = "rectangular panoramic scan"
+fallback_prompt = "" # second SAM3 prompt tried when no boxes found on first pass; leave empty to skip
+
+kernel_size = 9
+iterations = 5
+large_bb_area_ratio = 0.1
+
+easyocr_langs = ["en", "it"]
+easyocr_gpu = true
+save_deidentified_dir = ""
+
+merge_distance_px = 10
+max_box_area_px = 120000
+ellipse_axis_x_ratio = 0.45
+ellipse_axis_y_ratio = 0.35
+ellipse_proximity_px = 0.0
+deid_padding_px = 10
