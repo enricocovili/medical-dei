@@ -1,7 +1,7 @@
-# Base image: CUDA 12.6 + cuDNN developer headers on Ubuntu 24.04.
-# Ubuntu 24.04 ships Python 3.12 natively; CUDA 12.6+ is required by
-# flash-attn-3 and by SAM3's custom CUDA kernels.
-FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
+# Base image: CUDA 12.8 + cuDNN developer headers on Ubuntu 24.04.
+# Ubuntu 24.04 ships Python 3.12 natively; CUDA 12.8+ is required for
+# Blackwell (sm_120) GPU support (RTX 5000 series).
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
 # Prevent interactive prompts during apt installs (e.g. tzdata)
 ENV DEBIAN_FRONTEND=noninteractive
@@ -33,11 +33,10 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 # ── Virtual environment ──────────────────────────────────────────────────────
 RUN uv venv $VIRTUAL_ENV --python 3.12
 
-# ── PyTorch with CUDA 12.6 ──────────────────────────────────────────────────
-# torch==2.10.0 is the version pinned in setups/setup_sam3_cuda.bash.
-# cu126 index tag corresponds to CUDA 12.6.
-RUN uv pip install torch==2.10.0 torchvision \
-    --index-url https://download.pytorch.org/whl/cu126
+# ── PyTorch with CUDA 12.8 ──────────────────────────────────────────────────
+# cu128 index includes sm_120 (Blackwell) kernels; first supported in torch 2.7+.
+RUN uv pip install "torch>=2.7.0" torchvision \
+    --index-url https://download.pytorch.org/whl/cu128
 
 # ── SAM3 (Facebook Research, commit 86ed770) ────────────────────────────────
 # Installed as an editable package so `from sam3.model_builder import ...` works.
@@ -51,7 +50,7 @@ RUN git clone https://github.com/facebookresearch/sam3.git /opt/sam3 \
 # Speeds up SAM3 attention layers; skipped silently if the build fails
 # (e.g. on machines where ninja or CUDA headers are unavailable).
 RUN uv pip install flash-attn-3 --no-deps \
-    --index-url https://download.pytorch.org/whl/cu126 \
+    --index-url https://download.pytorch.org/whl/cu128 \
     || echo "[INFO] flash-attn-3 skipped"
 
 # ── CC Torch (connected-components kernel, used by SAM3) ────────────────────

@@ -3,7 +3,7 @@
 # REQUIREMENTS
 #   • Docker Engine 24+ with Compose V2 plugin
 #   • NVIDIA Container Toolkit (nvidia-docker2) installed on the host
-#   • CUDA 12.6+ drivers on the host GPU
+#   • CUDA 12.8+ drivers on the host GPU (required for Blackwell/RTX 5000 sm_120)
 #   • A Hugging Face account with access to the SAM3 model weights
 #
 # FIRST-TIME SETUP
