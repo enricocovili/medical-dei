@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="If set, save annotated images (GT green, predictions red) into this folder.",
     )
+    parser.add_argument(
+        "--cropped-image-dir",
+        type=Path,
+        default=None,
+        help="the dir to get the cropped image from before overlaying the GT and predictions. If not set, the script will look for the original images in the same folder as the ground-truth JSON.",
+    )
     return parser.parse_args()
 
 
@@ -118,7 +124,7 @@ def parse_predictions(raw: Any, min_confidence: float) -> Dict[str, List[Rect]]:
                 confidence = float(payload.get("confidence", 0.0))
                 if confidence < min_confidence:
                     continue
-                rect = parse_box_payload(payload.get("bbox", []))
+                rect = parse_box_payload(payload.get("boxes", []))
                 if rect is not None:
                     image_rects.append(rect)
             grouped[Path(image_name).stem] = image_rects
@@ -133,7 +139,7 @@ def parse_predictions(raw: Any, min_confidence: float) -> Dict[str, List[Rect]]:
                 continue
             key = Path(image_name).stem
             image_rects = grouped.setdefault(key, [])
-            boxes = record.get("deidentification_boxes", [])
+            boxes = record.get("boxes", [])
             if not isinstance(boxes, list):
                 continue
             for box in boxes:
@@ -254,7 +260,7 @@ def main() -> None:
     overlays_write_fail = 0
     if args.save_overlay_dir is not None:
         args.save_overlay_dir.mkdir(parents=True, exist_ok=True)
-        image_index = build_image_index(Path("imgs/output/postprocess"))
+        image_index = build_image_index(args.cropped_image_dir)
 
     print("=== Dataset structure ===")
     if isinstance(raw_predictions, dict):
@@ -326,6 +332,7 @@ def main() -> None:
                 out_name = f"{image_path.stem}_overlay{image_path.suffix.lower()}"
                 out_path = args.save_overlay_dir / out_name
                 if save_overlay_image(image_path, out_path, preds, gts):
+                    print(f"Saved overlay for {image} to {out_path}")
                     overlays_saved += 1
                 else:
                     overlays_write_fail += 1
