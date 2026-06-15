@@ -1,0 +1,91 @@
+# Medical image de-identification pipeline — Docker Compose
+#
+# REQUIREMENTS
+#   • Docker Engine 24+ with Compose V2 plugin
+#   • NVIDIA Container Toolkit (nvidia-docker2) installed on the host
+#   • CUDA 12.6+ drivers on the host GPU
+#   • A Hugging Face account with access to the SAM3 model weights
+#
+# FIRST-TIME SETUP
+#   1. Export your Hugging Face token:
+#        export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxx
+#      (or create a .env file in this directory: HF_TOKEN=hf_xxx)
+#
+#   2. Place input images in ./imgs/input/  (or adjust input_path in the config)
+#
+#   3. Build the image (one-time, ~10–20 min due to torch + SAM3):
+#        docker compose build
+#
+#   4. Run the pipeline:
+#        docker compose run --rm pipeline
+#
+# COMMON COMMANDS
+#   Run a specific stage (set run_mode in setups/pipeline_config.toml first):
+#     docker compose run --rm pipeline python pipeline/app.py
+#
+#   Run accuracy test against a ground-truth file:
+#     docker compose run --rm pipeline python test/test_accuracy.py \
+#       --predictions imgs/output/deidentification/records.json \
+#       --ground-truth imgs/test_dataset_text_groundtruth.json --per-image
+#
+#   Open a shell inside the container:
+#     docker compose run --rm pipeline bash
+
+services:
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # ── GPU access ─────────────────────────────────────────────────────────
+    # Requires the NVIDIA Container Toolkit on the host.
+    # Remove this block to run CPU-only (SAM3 and EasyOCR will be very slow).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all          # expose all available GPUs; set to 1 for single-GPU
+              capabilities: [gpu]
+
+    # ── Environment variables ──────────────────────────────────────────────
+    environment:
+      # Hugging Face access token — required for SAM3 model weights download on
+      # the first run. Set in shell or in a .env file alongside docker-compose.yml.
+      - HF_TOKEN=${HF_TOKEN:-}
+
+      # EasyOCR stores downloaded OCR models here; mapped to a named volume below
+      # so they are not re-downloaded on every `docker compose run`.
+      - EASYOCR_MODULE_PATH=/cache/easyocr
+
+    # ── Volume mounts ──────────────────────────────────────────────────────
+    volumes:
+      # Input images and output artifacts.
+      # The pipeline reads from input_path and writes to artifacts_dir;
+      # both are configured in setups/pipeline_config.toml and default to
+      # subdirectories of imgs/.
+      - ./imgs:/app/imgs
+
+      # Pipeline config (read-only inside the container so edits happen on host).
+      # Change run_mode, OCR settings, ellipse exclusion zone, etc. without
+      # rebuilding the image.
+      - ./setups/pipeline_config.toml:/app/setups/pipeline_config.toml:ro
+
+      # SAM3 model weights downloaded from Hugging Face.
+      # Persisted in a named volume to avoid re-downloading between runs.
+      - hf-model-cache:/root/.cache/huggingface
+
+      # EasyOCR model weights (craft, detection, recognition).
+      # Persisted in a named volume; path matches EASYOCR_MODULE_PATH above.
+      - easyocr-model-cache:/cache/easyocr
+
+    # Default command (matches Dockerfile CMD); override on the CLI as needed.
+    command: ["python", "pipeline/app.py", "--verbose"]
+
+# ── Named volumes ──────────────────────────────────────────────────────────
+# Docker manages these directories; they survive container removal.
+# To reset the model cache (force re-download):
+#   docker compose down -v
+volumes:
+  hf-model-cache:
+  easyocr-model-cache:

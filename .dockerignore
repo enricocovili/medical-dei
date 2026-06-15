@@ -1,0 +1,18 @@
+# Virtual environment (rebuilt inside container)
+.venv/
+
+# Input images and pipeline output (mounted as volumes at runtime)
+imgs/
+
+# Git history (not needed in image)
+.git/
+
+# Legacy and scratch scripts
+legacy_scripts/
+
+# IDE and OS clutter
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
