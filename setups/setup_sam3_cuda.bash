@@ -84,8 +84,8 @@ detect_cuda_version() {
         exit 1
     fi
 
-    if [ "$major" -lt 12 ] || { [ "$major" -eq 12 ] && [ "$minor" -lt 6 ]; }; then
-        echo -e "${RED}Detected CUDA ${cuda_version_raw}, but 12.6+ is required. Aborting.${NC}"
+    if [ "$major" -lt 12 ] || { [ "$major" -eq 12 ] && [ "$minor" -lt 8 ]; }; then
+        echo -e "${RED}Detected CUDA ${cuda_version_raw}, but 12.8+ is required for Blackwell (sm_120) support. Aborting.${NC}"
         exit 2
     fi
 
@@ -102,7 +102,7 @@ install_dependencies() {
     echo -e "${BLUE}Using CUDA tag: ${cuda_tag}${NC}"
     echo -e "${BLUE}Using index: ${pytorch_index_url}${NC}"
     
-    uv pip install torch==2.10.0 torchvision --index-url "${pytorch_index_url}"
+    uv pip install "torch>=2.7.0" torchvision --index-url "${pytorch_index_url}"
     notify_status "PyTorch installation"
     
     uv pip install -e .
