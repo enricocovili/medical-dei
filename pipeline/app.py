@@ -657,12 +657,15 @@ def run_report_stage(
     return entries
 
 
-def main() -> int:
-    args = parse_args()
-    setup_logging(args.verbose)
-    config = build_config()
+def run(config: PipelineConfig, logger: PipelineEventLogger | None = None) -> int:
+    """Run the pipeline for an in-memory config (no argparse / TOML reload).
+
+    Reusable entrypoint for embedding the pipeline (e.g. the ToothFairy4M runner
+    adapter). `main()` is the CLI wrapper around this.
+    """
+    if logger is None:
+        logger = PipelineEventLogger(logging.getLogger("pipeline"))
     artifacts = build_artifacts(config)
-    logger = PipelineEventLogger(logging.getLogger("pipeline"))
 
     logger.pipeline_started(config.run_mode)
 
@@ -718,6 +721,14 @@ def main() -> int:
         deid_records=deid_records,
     )
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    setup_logging(args.verbose)
+    config = build_config()
+    logger = PipelineEventLogger(logging.getLogger("pipeline"))
+    return run(config, logger)
 
 
 if __name__ == "__main__":
