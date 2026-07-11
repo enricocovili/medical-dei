@@ -6,6 +6,7 @@ import logging
 import time
 import tomllib
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,11 @@ import cv2
 import numpy as np
 
 try:
-    from .deidentifier_component import DeidentifierParams, EasyOcrDeidentifier
+    from .deidentifier_component import (
+        REDACTION_MODES,
+        Deidentifier,
+        DeidentifierParams,
+    )
     from .image_source import LocalImageSource
     from .logging_component import PipelineEventLogger
     from .mask_component import MaskPostprocessor
@@ -25,10 +30,23 @@ try:
         SegmentationResult,
         StageTimes,
     )
+    from .ocr_engines import (
+        EasyOcrParams,
+        OcrEngine,
+        build_easyocr_engine,
+        build_paddle_engine,
+    )
+    from .ocr_preprocess import apply_chain, validate_steps
+    from .ocr_strategies import RESOLUTION_STRATEGIES, TiledStrategy
     from .report_writer import JsonReportWriter
     from .sam3_component import Sam3ImageSegmenter
+    from .text_classifiers import TEXT_FILTERS, build_classifier
 except ImportError:
-    from deidentifier_component import DeidentifierParams, EasyOcrDeidentifier
+    from deidentifier_component import (
+        REDACTION_MODES,
+        Deidentifier,
+        DeidentifierParams,
+    )
     from image_source import LocalImageSource
     from logging_component import PipelineEventLogger
     from mask_component import MaskPostprocessor
@@ -40,8 +58,17 @@ except ImportError:
         SegmentationResult,
         StageTimes,
     )
+    from ocr_engines import (
+        EasyOcrParams,
+        OcrEngine,
+        build_easyocr_engine,
+        build_paddle_engine,
+    )
+    from ocr_preprocess import apply_chain, validate_steps
+    from ocr_strategies import RESOLUTION_STRATEGIES, TiledStrategy
     from report_writer import JsonReportWriter
     from sam3_component import Sam3ImageSegmenter
+    from text_classifiers import TEXT_FILTERS, build_classifier
 
 
 CONFIG_FILE = Path("setups/pipeline_config.toml")
@@ -70,6 +97,28 @@ class PipelineConfig:
     ellipse_axis_y_ratio: float
     ellipse_proximity_px: float
     deid_padding_px: int
+    ocr_engine: str
+    ocr_min_confidence: float
+    easyocr_text_threshold: float
+    easyocr_low_text: float
+    easyocr_link_threshold: float
+    easyocr_canvas_size: int
+    easyocr_mag_ratio: float
+    paddleocr_device: str
+    paddleocr_det_model: str
+    paddleocr_rec_model: str
+    preprocess_steps: list[str]
+    clahe_clip_limit: float
+    clahe_tile_grid_size: int
+    ocr_dual_pass_invert: bool
+    resolution_strategy: str
+    tile_size_px: int
+    tile_overlap_px: int
+    tile_dedupe_iou: float
+    text_filter: str
+    short_text_max_chars: int
+    redaction_mode: str
+    record_raw_detections: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +205,63 @@ def _optional_str(config: dict[str, object], key: str) -> str | None:
     return stripped if stripped else None
 
 
+def _optional_int(config: dict[str, object], key: str, default: int) -> int:
+    value = config.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"Config key '{key}' must be an integer when provided")
+    return int(value)
+
+
+def _optional_float(config: dict[str, object], key: str, default: float) -> float:
+    value = config.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"Config key '{key}' must be a float when provided")
+    return float(value)
+
+
+def _optional_bool(config: dict[str, object], key: str, default: bool) -> bool:
+    value = config.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"Config key '{key}' must be a boolean when provided")
+    return bool(value)
+
+
+def _optional_choice(
+    config: dict[str, object], key: str, default: str, choices: set[str]
+) -> str:
+    value = config.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError(f"Config key '{key}' must be a string when provided")
+    normalized = value.strip().lower()
+    if normalized not in choices:
+        raise ValueError(
+            f"Config key '{key}' must be one of {sorted(choices)}, got '{value}'"
+        )
+    return normalized
+
+
+def _optional_str_list(config: dict[str, object], key: str) -> list[str]:
+    value = config.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"Config key '{key}' must be a list of strings when provided")
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"All values in '{key}' must be non-empty strings")
+        items.append(item.strip().lower())
+    return items
+
+
 def _optional_path(config: dict[str, object], key: str) -> Path | None:
     value = config.get(key)
     if value is None:
@@ -169,8 +275,10 @@ def _optional_path(config: dict[str, object], key: str) -> Path | None:
 
 
 def build_config() -> PipelineConfig:
-    config = _load_pipeline_section()
+    return build_config_from_dict(_load_pipeline_section())
 
+
+def build_config_from_dict(config: dict[str, object]) -> PipelineConfig:
     run_mode_raw = config.get("run_mode", "full")
     if not isinstance(run_mode_raw, str):
         raise ValueError("Config key 'run_mode' must be a string")
@@ -205,6 +313,9 @@ def build_config() -> PipelineConfig:
     if not isinstance(save_artifacts_raw, bool):
         raise ValueError("Config key 'save_artifacts' must be a boolean")
 
+    preprocess_steps = _optional_str_list(config, "preprocess_steps")
+    validate_steps(preprocess_steps)
+
     return PipelineConfig(
         run_mode=run_mode,
         input_path=_resolve_path(_require_str(config, "input_path")),
@@ -225,6 +336,36 @@ def build_config() -> PipelineConfig:
         ellipse_axis_y_ratio=_require_float(config, "ellipse_axis_y_ratio"),
         ellipse_proximity_px=_require_float(config, "ellipse_proximity_px"),
         deid_padding_px=_require_int(config, "deid_padding_px"),
+        ocr_engine=_optional_choice(
+            config, "ocr_engine", "easyocr", {"easyocr", "paddleocr"}
+        ),
+        ocr_min_confidence=_optional_float(config, "ocr_min_confidence", 0.0),
+        easyocr_text_threshold=_optional_float(config, "easyocr_text_threshold", 0.5),
+        easyocr_low_text=_optional_float(config, "easyocr_low_text", 0.4),
+        easyocr_link_threshold=_optional_float(config, "easyocr_link_threshold", 0.4),
+        easyocr_canvas_size=_optional_int(config, "easyocr_canvas_size", 4000),
+        easyocr_mag_ratio=_optional_float(config, "easyocr_mag_ratio", 1.0),
+        paddleocr_device=_optional_str(config, "paddleocr_device") or "gpu",
+        paddleocr_det_model=_optional_str(config, "paddleocr_det_model")
+        or "PP-OCRv5_mobile_det",
+        paddleocr_rec_model=_optional_str(config, "paddleocr_rec_model")
+        or "PP-OCRv5_mobile_rec",
+        preprocess_steps=preprocess_steps,
+        clahe_clip_limit=_optional_float(config, "clahe_clip_limit", 2.0),
+        clahe_tile_grid_size=_optional_int(config, "clahe_tile_grid_size", 8),
+        ocr_dual_pass_invert=_optional_bool(config, "ocr_dual_pass_invert", False),
+        resolution_strategy=_optional_choice(
+            config, "resolution_strategy", "full", RESOLUTION_STRATEGIES
+        ),
+        tile_size_px=_optional_int(config, "tile_size_px", 1600),
+        tile_overlap_px=_optional_int(config, "tile_overlap_px", 200),
+        tile_dedupe_iou=_optional_float(config, "tile_dedupe_iou", 0.5),
+        text_filter=_optional_choice(config, "text_filter", "none", TEXT_FILTERS),
+        short_text_max_chars=_optional_int(config, "short_text_max_chars", 2),
+        redaction_mode=_optional_choice(
+            config, "redaction_mode", "outline", REDACTION_MODES
+        ),
+        record_raw_detections=_optional_bool(config, "record_raw_detections", False),
     )
 
 
@@ -262,14 +403,40 @@ def build_postprocessor(config: PipelineConfig) -> MaskPostprocessor:
     )
 
 
-def build_deidentifier(
-    logger: PipelineEventLogger, config: PipelineConfig
-) -> EasyOcrDeidentifier:
-    logger.loading_model("EasyOCR")
-    import easyocr
+def build_ocr_engine(logger: PipelineEventLogger, config: PipelineConfig) -> OcrEngine:
+    if config.ocr_engine == "easyocr":
+        logger.loading_model("EasyOCR")
+        engine: OcrEngine = build_easyocr_engine(
+            config.easyocr_langs,
+            config.easyocr_gpu,
+            EasyOcrParams(
+                text_threshold=config.easyocr_text_threshold,
+                low_text=config.easyocr_low_text,
+                link_threshold=config.easyocr_link_threshold,
+                canvas_size=config.easyocr_canvas_size,
+                mag_ratio=config.easyocr_mag_ratio,
+            ),
+        )
+        logger.model_loaded("EasyOCR")
+        return engine
 
-    reader = easyocr.Reader(config.easyocr_langs, gpu=config.easyocr_gpu)
-    logger.model_loaded("EasyOCR")
+    logger.loading_model("PaddleOCR")
+    engine = build_paddle_engine(
+        device=config.paddleocr_device,
+        det_model=config.paddleocr_det_model,
+        rec_model=config.paddleocr_rec_model,
+    )
+    logger.model_loaded("PaddleOCR")
+    return engine
+
+
+def build_deidentifier(
+    logger: PipelineEventLogger,
+    config: PipelineConfig,
+    engine: OcrEngine | None = None,
+) -> Deidentifier:
+    if engine is None:
+        engine = build_ocr_engine(logger, config)
     params = DeidentifierParams(
         merge_distance_px=config.merge_distance_px,
         max_box_area_px=config.max_box_area_px,
@@ -279,8 +446,33 @@ def build_deidentifier(
         ),
         ellipse_proximity_px=config.ellipse_proximity_px,
         padding_px=config.deid_padding_px,
+        min_confidence=config.ocr_min_confidence,
+        redaction_mode=config.redaction_mode,
     )
-    return EasyOcrDeidentifier(reader=reader, params=params)
+    strategy = None
+    if config.resolution_strategy == "tiled":
+        strategy = TiledStrategy(
+            tile_size_px=config.tile_size_px,
+            tile_overlap_px=config.tile_overlap_px,
+            dedupe_containment=config.tile_dedupe_iou,
+        )
+    classifier = build_classifier(config.text_filter, config.short_text_max_chars)
+    preprocess = None
+    if config.preprocess_steps:
+        preprocess = partial(
+            apply_chain,
+            steps=list(config.preprocess_steps),
+            clahe_clip_limit=config.clahe_clip_limit,
+            clahe_tile_grid_size=config.clahe_tile_grid_size,
+        )
+    return Deidentifier(
+        engine=engine,
+        params=params,
+        strategy=strategy,
+        classifier=classifier,
+        preprocess=preprocess,
+        dual_pass_invert=config.ocr_dual_pass_invert,
+    )
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -519,11 +711,12 @@ def run_postprocess_stage(
 def run_deidentification_stage(
     artifacts: StageArtifacts,
     logger: PipelineEventLogger,
-    deidentifier: EasyOcrDeidentifier,
+    deidentifier: Deidentifier,
     postprocess_records: list[dict[str, Any]] | None = None,
     *,
     in_memory_crops: dict[str, np.ndarray] | None = None,
     save_artifacts: bool = True,
+    record_raw_detections: bool = False,
 ) -> list[dict[str, Any]]:
     logger.stage_started("deidentification")
     records_in = (
@@ -544,22 +737,23 @@ def run_deidentification_stage(
             crop_rgb = _load_image_rgb(crop_path)
 
         start = time.perf_counter()
-        deidentified, deidentification_boxes = deidentifier.deidentify_with_boxes(
-            crop_rgb, name
-        )
+        result = deidentifier.run(crop_rgb, name)
         stage_time = time.perf_counter() - start
 
         if save_artifacts:
             deid_relpath = _image_relpath_png(name)
-            _save_image(artifacts.deid_images_dir / deid_relpath, deidentified)
+            _save_image(artifacts.deid_images_dir / deid_relpath, result.image)
 
-        out_records.append(
-            {
-                "name": name,
-                "deidentification_time": float(stage_time),
-                "boxes": deidentification_boxes,
-            }
-        )
+        out_record: dict[str, Any] = {
+            "name": name,
+            "deidentification_time": float(stage_time),
+            "boxes": result.boxes,
+            "detections": result.detections,
+        }
+        if record_raw_detections:
+            out_record["raw_detections"] = result.raw_detections
+            out_record["skipped_detections"] = result.skipped_detections
+        out_records.append(out_record)
 
     _write_json(artifacts.deid_records_json, out_records)
     logger.stage_completed("deidentification", len(out_records))
@@ -632,7 +826,7 @@ def run_report_stage(
             ),
             bounding_boxes=_deserialize_boxes(record.get("bounding_boxes", [])),
             deidentification_boxes=_deserialize_boxes(
-                deid_record.get("deidentification_boxes", [])
+                deid_record.get("boxes", deid_record.get("deidentification_boxes", []))
             ),
             metrics=ImageMetrics(
                 times=StageTimes(
@@ -678,7 +872,12 @@ def main() -> int:
 
     if config.run_mode == "deidentification":
         deidentifier = build_deidentifier(logger, config)
-        run_deidentification_stage(artifacts, logger, deidentifier)
+        run_deidentification_stage(
+            artifacts,
+            logger,
+            deidentifier,
+            record_raw_detections=config.record_raw_detections,
+        )
         return 0
 
     if config.run_mode == "report":
@@ -708,6 +907,7 @@ def main() -> int:
         postprocess_records=post_records,
         in_memory_crops=in_mem_crops,
         save_artifacts=save_arts,
+        record_raw_detections=config.record_raw_detections,
     )
     run_report_stage(
         config,

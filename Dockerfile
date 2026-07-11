@@ -64,6 +64,18 @@ RUN uv pip install \
     "opencv-python>=4.13.0.92" \
     "pillow>=12.2.0"
 
+# ── PaddleOCR PP-OCRv5 backend (optional, CPU wheels) ────────────────────────
+# CPU paddle works on any host; PP-OCRv5 mobile det/rec models are designed
+# for CPU inference. For GPU on the 2080 Ti runner (CUDA 12.9 driver), install
+# paddlepaddle-gpu cu126 manually instead:
+#   uv pip install paddlepaddle-gpu==3.* -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+# (No official sm_120/Blackwell wheels as of 2026-07 — keep CPU on RTX 5000.)
+# Build with `--build-arg INSTALL_PADDLE=0` to skip this layer.
+ARG INSTALL_PADDLE=1
+RUN if [ "$INSTALL_PADDLE" = "1" ]; then \
+        uv pip install "paddleocr>=3.0,<4" "paddlepaddle>=3.0" ; \
+    fi
+
 # ── Application source ───────────────────────────────────────────────────────
 WORKDIR /app
 COPY pipeline/  ./pipeline/

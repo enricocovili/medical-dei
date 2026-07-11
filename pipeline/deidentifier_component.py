@@ -1,13 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 import cv2
 import numpy as np
 
-type Detection = tuple[list[list[int]], str, float]
+try:
+    from .ocr_engines import OcrDetection, OcrEngine
+    from .ocr_strategies import FullImageStrategy, ResolutionStrategy
+    from .text_classifiers import RedactAllClassifier, RedactionClassifier
+except ImportError:
+    from ocr_engines import OcrDetection, OcrEngine
+    from ocr_strategies import FullImageStrategy, ResolutionStrategy
+    from text_classifiers import RedactAllClassifier, RedactionClassifier
+
 type Rect = tuple[float, float, float, float]
+
+REDACTION_MODES = {"outline", "fill"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,12 +27,69 @@ class DeidentifierParams:
     center_ellipse_axes_ratio: tuple[float, float] = (0.35, 0.25)
     ellipse_proximity_px: float = 0.0
     padding_px: int = 3
+    min_confidence: float = 0.0
+    redaction_mode: str = "outline"  # outline (debug) | fill (real anonymization)
 
 
-class EasyOcrDeidentifier:
-    def __init__(self, reader: Any, params: DeidentifierParams | None = None) -> None:
-        self._reader = reader
+@dataclass(frozen=True, slots=True)
+class DeidentificationResult:
+    image: np.ndarray
+    detections: list[dict[str, Any]] = field(default_factory=list)
+    skipped_detections: list[dict[str, Any]] = field(default_factory=list)
+    raw_detections: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def boxes(self) -> list[list[int]]:
+        return [list(det["box"]) for det in self.detections]
+
+
+def _detection_payload(detection: OcrDetection) -> dict[str, Any]:
+    x1, y1, x2, y2 = _bbox_to_rect(detection.quad)
+    return {
+        "box": [int(round(x1)), int(round(y1)), int(round(x2 - x1)), int(round(y2 - y1))],
+        "text": detection.text,
+        "confidence": detection.confidence,
+    }
+
+
+def _bbox_to_rect(bbox: list[list[int]]) -> Rect:
+    xs = [float(point[0]) for point in bbox]
+    ys = [float(point[1]) for point in bbox]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _rect_to_bbox(rect: Rect) -> list[list[int]]:
+    x1, y1, x2, y2 = rect
+    return [
+        [int(round(x1)), int(round(y1))],
+        [int(round(x2)), int(round(y1))],
+        [int(round(x2)), int(round(y2))],
+        [int(round(x1)), int(round(y2))],
+    ]
+
+
+def _rect_area(rect: Rect) -> float:
+    x1, y1, x2, y2 = rect
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+class Deidentifier:
+    def __init__(
+        self,
+        engine: OcrEngine,
+        params: DeidentifierParams | None = None,
+        *,
+        strategy: ResolutionStrategy | None = None,
+        classifier: RedactionClassifier | None = None,
+        preprocess: Callable[[np.ndarray], np.ndarray] | None = None,
+        dual_pass_invert: bool = False,
+    ) -> None:
+        self._engine = engine
         self._params = params or DeidentifierParams()
+        self._strategy = strategy or FullImageStrategy()
+        self._classifier = classifier or RedactAllClassifier()
+        self._preprocess = preprocess
+        self._dual_pass_invert = dual_pass_invert
         if self._params.merge_distance_px < 0:
             raise ValueError("merge_distance_px must be >= 0")
         if (
@@ -37,86 +104,83 @@ class EasyOcrDeidentifier:
             raise ValueError("ellipse_proximity_px must be >= 0")
         if self._params.padding_px < 0:
             raise ValueError("padding_px must be >= 0")
+        if not 0.0 <= self._params.min_confidence <= 1.0:
+            raise ValueError("min_confidence must be in [0, 1]")
+        if self._params.redaction_mode not in REDACTION_MODES:
+            raise ValueError(
+                f"redaction_mode must be one of {sorted(REDACTION_MODES)}"
+            )
 
     def deidentify(self, image_rgb: np.ndarray, image_name: str) -> np.ndarray:
-        deidentified, _ = self.deidentify_with_boxes(image_rgb, image_name)
-        return deidentified
+        return self.run(image_rgb, image_name).image
 
     def deidentify_with_boxes(
         self, image_rgb: np.ndarray, image_name: str
     ) -> tuple[np.ndarray, list[list[int]]]:
+        result = self.run(image_rgb, image_name)
+        return result.image, result.boxes
+
+    def run(self, image_rgb: np.ndarray, image_name: str) -> DeidentificationResult:
+        fill_mode = self._params.redaction_mode == "fill"
         if image_rgb.ndim == 2:
             read_target = cv2.cvtColor(image_rgb, cv2.COLOR_GRAY2RGB)
             out = image_rgb.copy()
-            fill_color: tuple[int, int, int] | int = 0
+            draw_color: tuple[int, int, int] | int = 0
         else:
             read_target = image_rgb
             out = image_rgb.copy()
-            fill_color = (0, 0, 255)
+            draw_color = (0, 0, 0) if fill_mode else (0, 0, 255)
 
-        results_normal = self._reader.readtext(
-            read_target, 
-            text_threshold=0.5,
-            canvas_size=4000,
-            mag_ratio=1.0,
-        )
-        # results_shrunk = self._reader.readtext(
-        #     read_target, mag_ratio=0.1, text_threshold=0.5
-        # )
-        results_shrunk = []
-        all_results = self._parse_detections(results_normal) + self._parse_detections(
-            results_shrunk
-        )
+        if self._preprocess is not None:
+            read_target = self._preprocess(read_target)
 
-        filtered_single = self._filter_detections(all_results, read_target.shape)
+        raw = self._strategy.detect(self._engine, read_target)
+        if self._dual_pass_invert:
+            raw = raw + self._strategy.detect(
+                self._engine, cv2.bitwise_not(read_target)
+            )
+
+        confident = [
+            det for det in raw if det.confidence >= self._params.min_confidence
+        ]
+        kept: list[OcrDetection] = []
+        skipped: list[OcrDetection] = []
+        for det in confident:
+            if self._classifier.should_redact(det):
+                kept.append(det)
+            else:
+                skipped.append(det)
+
+        filtered_single = self._filter_detections(kept, read_target.shape)
         filtered = self._merge_close_detections(filtered_single)
 
         height, width = out.shape[:2]
-        drawn_boxes: list[list[int]] = []
-        for bbox, _, _ in filtered:
-            xs = [int(point[0]) for point in bbox]
-            ys = [int(point[1]) for point in bbox]
+        thickness = cv2.FILLED if fill_mode else 3
+        detections: list[dict[str, Any]] = []
+        for det in filtered:
+            xs = [int(point[0]) for point in det.quad]
+            ys = [int(point[1]) for point in det.quad]
             left = max(0, min(width, min(xs) - self._params.padding_px))
             top = max(0, min(height, min(ys) - self._params.padding_px))
             right = max(0, min(width, max(xs) + self._params.padding_px))
             bottom = max(0, min(height, max(ys) + self._params.padding_px))
             if right > left and bottom > top:
-                cv2.rectangle(out, (left, top), (right, bottom), fill_color, thickness=3)
-                drawn_boxes.append([left, top, right - left, bottom - top])
-        return out, drawn_boxes
-
-    def _parse_detections(self, raw_results: Any) -> list[Detection]:
-        parsed: list[Detection] = []
-        for item in raw_results:
-            if not isinstance(item, (tuple, list)) or len(item) < 3:
-                continue
-            bbox, text, prob = item[0], item[1], item[2]
-            if not isinstance(bbox, (tuple, list)) or len(bbox) < 4:
-                continue
-            bbox_int = [[int(round(point[0])), int(round(point[1]))] for point in bbox]
-            parsed.append((bbox_int, str(text), float(prob)))
-        return parsed
-
-    @staticmethod
-    def _bbox_to_rect(bbox: list[list[int]]) -> Rect:
-        xs = [float(point[0]) for point in bbox]
-        ys = [float(point[1]) for point in bbox]
-        return min(xs), min(ys), max(xs), max(ys)
-
-    @staticmethod
-    def _rect_to_bbox(rect: Rect) -> list[list[int]]:
-        x1, y1, x2, y2 = rect
-        return [
-            [int(round(x1)), int(round(y1))],
-            [int(round(x2)), int(round(y1))],
-            [int(round(x2)), int(round(y2))],
-            [int(round(x1)), int(round(y2))],
-        ]
-
-    @staticmethod
-    def _rect_area(rect: Rect) -> float:
-        x1, y1, x2, y2 = rect
-        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+                cv2.rectangle(
+                    out, (left, top), (right, bottom), draw_color, thickness=thickness
+                )
+                detections.append(
+                    {
+                        "box": [left, top, right - left, bottom - top],
+                        "text": det.text,
+                        "confidence": det.confidence,
+                    }
+                )
+        return DeidentificationResult(
+            image=out,
+            detections=detections,
+            skipped_detections=[_detection_payload(det) for det in skipped],
+            raw_detections=[_detection_payload(det) for det in raw],
+        )
 
     def _touches_center_ellipse(self, rect: Rect, image_shape: tuple[int, ...]) -> bool:
         image_h, image_w = image_shape[:2]
@@ -140,19 +204,19 @@ class EasyOcrDeidentifier:
         return ellipse_equation <= 1.0
 
     def _filter_detections(
-        self, detections: list[Detection], image_shape: tuple[int, ...]
-    ) -> list[Detection]:
-        filtered: list[Detection] = []
-        for bbox, text, prob in detections:
-            rect = self._bbox_to_rect(bbox)
+        self, detections: list[OcrDetection], image_shape: tuple[int, ...]
+    ) -> list[OcrDetection]:
+        filtered: list[OcrDetection] = []
+        for det in detections:
+            rect = _bbox_to_rect(det.quad)
             if (
                 self._params.max_box_area_px is not None
-                and self._rect_area(rect) > self._params.max_box_area_px
+                and _rect_area(rect) > self._params.max_box_area_px
             ):
                 continue
             if self._touches_center_ellipse(rect, image_shape):
                 continue
-            filtered.append((bbox, text, prob))
+            filtered.append(det)
         return filtered
 
     @staticmethod
@@ -166,11 +230,13 @@ class EasyOcrDeidentifier:
             or by2 + distance_px < ay1
         )
 
-    def _merge_close_detections(self, detections: list[Detection]) -> list[Detection]:
+    def _merge_close_detections(
+        self, detections: list[OcrDetection]
+    ) -> list[OcrDetection]:
         if not detections:
             return []
 
-        rects = [self._bbox_to_rect(bbox) for bbox, _, _ in detections]
+        rects = [_bbox_to_rect(det.quad) for det in detections]
         parent = list(range(len(rects)))
 
         def find(index: int) -> int:
@@ -196,23 +262,27 @@ class EasyOcrDeidentifier:
                 groups[root] = []
             groups[root].append(index)
 
-        merged: list[Detection] = []
+        merged: list[OcrDetection] = []
         for indices in groups.values():
             x1 = min(rects[i][0] for i in indices)
             y1 = min(rects[i][1] for i in indices)
             x2 = max(rects[i][2] for i in indices)
             y2 = max(rects[i][3] for i in indices)
             merged_text = " | ".join(
-                text for i in indices if (text := detections[i][1].strip())
+                text for i in indices if (text := detections[i].text.strip())
             )
-            merged_confidence = max(float(detections[i][2]) for i in indices)
+            merged_confidence = max(float(detections[i].confidence) for i in indices)
             merged.append(
-                (
-                    self._rect_to_bbox((x1, y1, x2, y2)),
-                    merged_text,
-                    merged_confidence,
+                OcrDetection(
+                    quad=_rect_to_bbox((x1, y1, x2, y2)),
+                    text=merged_text,
+                    confidence=merged_confidence,
                 )
             )
 
-        merged.sort(key=lambda det: (det[0][0][1], det[0][0][0]))
+        merged.sort(key=lambda det: (det.quad[0][1], det.quad[0][0]))
         return merged
+
+
+# Backward-compatible alias (pre-engine-abstraction name).
+EasyOcrDeidentifier = Deidentifier

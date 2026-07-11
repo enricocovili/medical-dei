@@ -229,6 +229,75 @@ def safe_div(num: float, den: float) -> float:
     return num / den if den else 0.0
 
 
+def evaluate(
+    predictions: Dict[str, List[Rect]],
+    ground_truth: Dict[str, List[Rect]],
+    margin_px: float,
+) -> Dict:
+    all_images = sorted(set(ground_truth.keys()) | set(predictions.keys()))
+
+    total_gt_boxes = 0
+    fully_covered_gt_boxes = 0
+    uncovered_gt_boxes = 0
+    gt_coverage_sum = 0.0
+    total_pred_boxes = 0
+    outside_gt_fp_boxes = 0
+    per_image: List[Dict] = []
+
+    for image in all_images:
+        preds = predictions.get(image, [])
+        gts = ground_truth.get(image, [])
+
+        image_coverage_sum = 0.0
+        image_fully_covered = 0
+        image_uncovered = 0
+        for gt_box in gts:
+            coverage = gt_best_coverage_ratio(gt_box, preds, margin_px)
+            image_coverage_sum += coverage
+            if coverage >= 0.999999:
+                image_fully_covered += 1
+            if coverage <= 0.0:
+                image_uncovered += 1
+
+        image_outside_fp = sum(
+            1
+            for pred_box in preds
+            if pred_is_outside_ground_truth(pred_box, gts, margin_px)
+        )
+
+        per_image.append(
+            {
+                "image": image,
+                "gt_count": len(gts),
+                "pred_count": len(preds),
+                "mean_gt_coverage": safe_div(image_coverage_sum, len(gts)),
+                "fully_covered": image_fully_covered,
+                "uncovered": image_uncovered,
+                "outside_gt_fp": image_outside_fp,
+            }
+        )
+
+        total_gt_boxes += len(gts)
+        fully_covered_gt_boxes += image_fully_covered
+        uncovered_gt_boxes += image_uncovered
+        gt_coverage_sum += image_coverage_sum
+        total_pred_boxes += len(preds)
+        outside_gt_fp_boxes += image_outside_fp
+
+    return {
+        "margin_px": margin_px,
+        "total_gt": total_gt_boxes,
+        "gt_coverage_score": safe_div(gt_coverage_sum, total_gt_boxes),
+        "fully_covered": fully_covered_gt_boxes,
+        "gt_full_coverage_rate": safe_div(fully_covered_gt_boxes, total_gt_boxes),
+        "uncovered": uncovered_gt_boxes,
+        "total_pred": total_pred_boxes,
+        "outside_gt_fp": outside_gt_fp_boxes,
+        "outside_gt_fp_rate": safe_div(outside_gt_fp_boxes, total_pred_boxes),
+        "per_image": per_image,
+    }
+
+
 def main() -> None:
     args = parse_args()
     raw_predictions = load_json(args.predictions)
@@ -240,16 +309,6 @@ def main() -> None:
 
     predictions = parse_predictions(raw_predictions, min_confidence=args.min_confidence)
     ground_truth = parse_ground_truth(raw_ground_truth)
-
-    all_images = sorted(set(ground_truth.keys()) | set(predictions.keys()))
-
-    total_gt_boxes = 0
-    fully_covered_gt_boxes = 0
-    uncovered_gt_boxes = 0
-    gt_coverage_sum = 0.0
-
-    total_pred_boxes = 0
-    outside_gt_fp_boxes = 0
 
     images_with_not_fully_covered: List[str] = []
     not_fully_covered_count_by_image: Dict[str, int] = {}
@@ -279,47 +338,22 @@ def main() -> None:
     )
     print()
 
-    for image in all_images:
-        preds = predictions.get(image, [])
-        gts = ground_truth.get(image, [])
+    metrics = evaluate(predictions, ground_truth, args.margin_px)
 
-        image_coverage_sum = 0.0
-        image_fully_covered = 0
-        image_uncovered = 0
-
-        for gt_box in gts:
-            coverage = gt_best_coverage_ratio(gt_box, preds, args.margin_px)
-            image_coverage_sum += coverage
-            if coverage >= 0.999999:
-                image_fully_covered += 1
-            if coverage <= 0.0:
-                image_uncovered += 1
-
-        image_outside_fp = sum(
-            1
-            for pred_box in preds
-            if pred_is_outside_ground_truth(pred_box, gts, args.margin_px)
-        )
+    for image_stats in metrics["per_image"]:
+        image = image_stats["image"]
 
         if args.per_image:
-            image_gt_count = len(gts)
-            image_mean_cov = safe_div(image_coverage_sum, image_gt_count)
             print(
-                f"{image}: gt={image_gt_count} pred={len(preds)} "
-                f"mean_gt_coverage={image_mean_cov:.4f} "
-                f"fully_covered_gt={image_fully_covered}/{image_gt_count} "
-                f"outside_gt_fp={image_outside_fp}"
+                f"{image}: gt={image_stats['gt_count']} pred={image_stats['pred_count']} "
+                f"mean_gt_coverage={image_stats['mean_gt_coverage']:.4f} "
+                f"fully_covered_gt={image_stats['fully_covered']}/{image_stats['gt_count']} "
+                f"outside_gt_fp={image_stats['outside_gt_fp']}"
             )
 
-        total_gt_boxes += len(gts)
-        fully_covered_gt_boxes += image_fully_covered
-        uncovered_gt_boxes += image_uncovered
-        gt_coverage_sum += image_coverage_sum
-
-        total_pred_boxes += len(preds)
-        outside_gt_fp_boxes += image_outside_fp
-
-        image_not_fully_covered = len(gts) - image_fully_covered
+        image_not_fully_covered = (
+            image_stats["gt_count"] - image_stats["fully_covered"]
+        )
         if image_not_fully_covered > 0:
             images_with_not_fully_covered.append(image)
             not_fully_covered_count_by_image[image] = image_not_fully_covered
@@ -331,30 +365,28 @@ def main() -> None:
             else:
                 out_name = f"{image_path.stem}_overlay{image_path.suffix.lower()}"
                 out_path = args.save_overlay_dir / out_name
+                preds = predictions.get(image, [])
+                gts = ground_truth.get(image, [])
                 if save_overlay_image(image_path, out_path, preds, gts):
                     print(f"Saved overlay for {image} to {out_path}")
                     overlays_saved += 1
                 else:
                     overlays_write_fail += 1
 
-    gt_coverage_score = safe_div(gt_coverage_sum, total_gt_boxes)
-    gt_full_coverage_rate = safe_div(fully_covered_gt_boxes, total_gt_boxes)
-    outside_gt_fp_rate = safe_div(outside_gt_fp_boxes, total_pred_boxes)
-
     print("=== Ground-truth coverage metrics ===")
     print(f"Margin tolerance: {args.margin_px:.1f}px")
-    print(f"Total GT boxes: {total_gt_boxes}")
-    print(f"GT coverage score (mean covered area): {gt_coverage_score:.4f}")
+    print(f"Total GT boxes: {metrics['total_gt']}")
+    print(f"GT coverage score (mean covered area): {metrics['gt_coverage_score']:.4f}")
     print(
-        f"Fully covered GT boxes: {fully_covered_gt_boxes}/{total_gt_boxes} "
-        f"({gt_full_coverage_rate:.4f})"
+        f"Fully covered GT boxes: {metrics['fully_covered']}/{metrics['total_gt']} "
+        f"({metrics['gt_full_coverage_rate']:.4f})"
     )
-    print(f"Uncovered GT boxes: {uncovered_gt_boxes}")
+    print(f"Uncovered GT boxes: {metrics['uncovered']}")
     print()
     print("=== False positives outside GT ===")
     print(
-        f"Outside-GT predictions: {outside_gt_fp_boxes}/{total_pred_boxes} "
-        f"({outside_gt_fp_rate:.4f})"
+        f"Outside-GT predictions: {metrics['outside_gt_fp']}/{metrics['total_pred']} "
+        f"({metrics['outside_gt_fp_rate']:.4f})"
     )
     print()
     print("=== Images with not fully covered GT boxes ===")

@@ -79,6 +79,14 @@ services:
       # Persisted in a named volume; path matches EASYOCR_MODULE_PATH above.
       - easyocr-model-cache:/cache/easyocr
 
+      # PaddleOCR (PP-OCRv5) model weights, downloaded on first paddle run.
+      - paddlex-model-cache:/root/.paddlex
+
+      # Test/benchmark scripts and benchmark outputs; mounted so harness edits
+      # and sweep results don't require image rebuilds.
+      - ./test:/app/test
+      - ./thesis/thesis_data_out:/app/thesis/thesis_data_out
+
     # Default command (matches Dockerfile CMD); override on the CLI as needed.
     command: ["python", "pipeline/app.py", "--verbose"]
 
@@ -89,3 +97,4 @@ services:
 volumes:
   hf-model-cache:
   easyocr-model-cache:
+  paddlex-model-cache:

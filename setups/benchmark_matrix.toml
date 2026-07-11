@@ -1,0 +1,55 @@
+# Sweep specification for test/benchmark_deid.py.
+#
+# [base] points at FROZEN upstream artifacts: ground-truth boxes are annotated
+# in crop coordinates, so crops_dir/postprocess_records must be the exact
+# postprocess outputs the ground truth was drawn on (do not re-run sam3 or
+# postprocess between benchmark runs).
+#
+# Each [[variant]] holds config overrides applied on top of
+# setups/pipeline_config.toml [pipeline]; a variant with only a name runs the
+# current defaults (baseline).
+
+[base]
+crops_dir = "imgs/output/postprocess/crops"
+postprocess_records = "imgs/output/postprocess/records.json"
+ground_truth = "imgs/sam3_processed_panoramic/test_dataset_text_groundtruth.json"
+margin_px = 5.0
+out_root = "thesis/thesis_data_out/ocr_benchmarks/panoramic"
+
+[[variant]]
+name = "baseline_easyocr"
+
+[[variant]]
+name = "easyocr_clahe"
+preprocess_steps = ["grayscale", "clahe"]
+
+[[variant]]
+name = "easyocr_conf02"
+ocr_min_confidence = 0.2
+
+[[variant]]
+name = "easyocr_short_text"
+text_filter = "short_text"
+
+[[variant]]
+name = "easyocr_native_canvas"
+easyocr_canvas_size = 5000
+
+[[variant]]
+name = "easyocr_tiled"
+resolution_strategy = "tiled"
+
+[[variant]]
+name = "easyocr_clahe_conf02_short"
+preprocess_steps = ["grayscale", "clahe"]
+ocr_min_confidence = 0.2
+text_filter = "short_text"
+
+[[variant]]
+name = "paddle_mobile"
+ocr_engine = "paddleocr"
+
+[[variant]]
+name = "paddle_mobile_short_text"
+ocr_engine = "paddleocr"
+text_filter = "short_text"

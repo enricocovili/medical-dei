@@ -12,9 +12,45 @@ kernel_size = 9
 iterations = 5
 large_bb_area_ratio = 0.1
 
+# ── OCR engine ───────────────────────────────────────────────────────────────
+ocr_engine = "easyocr" # easyocr | paddleocr
 easyocr_langs = ["en", "it"]
 easyocr_gpu = true
 save_deidentified_dir = ""
+
+# Minimum per-detection confidence; detections below are discarded (0.0 = keep all)
+ocr_min_confidence = 0.0
+# EasyOCR readtext tuning (defaults match previous hardcoded values)
+easyocr_text_threshold = 0.5
+easyocr_low_text = 0.4
+easyocr_link_threshold = 0.4
+easyocr_canvas_size = 4000 # images with a longer side are downscaled internally
+easyocr_mag_ratio = 1.0
+
+# PaddleOCR PP-OCRv5 (used when ocr_engine = "paddleocr"; needs the paddle extra)
+paddleocr_device = "gpu" # cpu | gpu — falls back to cpu at runtime when no GPU is usable
+paddleocr_det_model = "PP-OCRv5_mobile_det"
+paddleocr_rec_model = "PP-OCRv5_mobile_rec"
+
+# ── OCR preprocessing (applied to the OCR input only, never to the output) ──
+preprocess_steps = [] # ordered subset of ["grayscale", "clahe", "invert"]
+clahe_clip_limit = 2.0
+clahe_tile_grid_size = 8
+ocr_dual_pass_invert = false # also OCR the inverted image and union detections
+
+# ── Resolution strategy ──────────────────────────────────────────────────────
+resolution_strategy = "full" # full | tiled
+tile_size_px = 1600
+tile_overlap_px = 200 # must exceed the tallest expected text line
+tile_dedupe_iou = 0.5 # containment ratio for cross-tile duplicate merging
+
+# ── Text filter (which detections get redacted) ──────────────────────────────
+text_filter = "none" # none | short_text (skip detections <= short_text_max_chars)
+short_text_max_chars = 2
+
+# ── Redaction output ─────────────────────────────────────────────────────────
+redaction_mode = "outline" # outline (debug boxes) | fill (real anonymization)
+record_raw_detections = false # also store raw + skipped detections in records.json
 
 merge_distance_px = 10
 max_box_area_px = 120000
