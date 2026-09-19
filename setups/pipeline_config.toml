@@ -14,7 +14,8 @@ iterations = 5
 large_bb_area_ratio = 0.1
 
 # ── OCR engine ───────────────────────────────────────────────────────────────
-ocr_engine = "easyocr" # easyocr | paddleocr
+# easyocr | paddleocr | rapidocr | onnxtr | surya | vlm | ensemble
+ocr_engine = "easyocr"
 easyocr_langs = ["en", "it"]
 easyocr_gpu = false
 save_deidentified_dir = ""
@@ -32,6 +33,61 @@ easyocr_mag_ratio = 1.0
 paddleocr_device = "gpu" # cpu | gpu — falls back to cpu at runtime when no GPU is usable
 paddleocr_det_model = "PP-OCRv5_mobile_det"
 paddleocr_rec_model = "PP-OCRv5_mobile_rec"
+
+# ── RapidOCR: the same PP-OCR DB detector over ONNX Runtime ─────────────────
+# Preferred over paddleocr on GPU hosts: no paddlepaddle, which ships no sm_120
+# wheels and so cannot use a Blackwell card at all. Needs the 'rapidocr' extra.
+# NOTE: the official onnxruntime-gpu wheels also lack sm_120 kernels, so on an
+# RTX 5000 this silently runs on CPU — the builder logs the available providers.
+rapidocr_device = "gpu" # cpu | gpu
+# Detection thresholds, which the paddleocr adapter hard-codes away. These are
+# the cheapest recall levers here; the defaults below are deliberately looser
+# than the library's, because over-redaction is cheap and a miss leaks PHI.
+rapidocr_text_score = 0.3       # library default 0.5
+rapidocr_box_thresh = 0.3       # library default 0.5 — box acceptance
+rapidocr_thresh = 0.2           # library default 0.3 — pixel binarisation
+rapidocr_unclip_ratio = 2.0     # library default 1.6 — inflates every polygon
+rapidocr_limit_side_len = 2560  # library default ~736 would crush a panoramic
+rapidocr_use_rec = true         # false = detection only, much faster, text = ""
+
+# ── OnnxTR: DBNet / ResNet-50, same runtime, different backbone ─────────────
+# Different training set from PP-OCR, so its errors decorrelate — which is the
+# point of putting both in the ensemble. Needs the 'onnxtr' extra.
+onnxtr_device = "gpu" # cpu | gpu
+onnxtr_arch = "db_resnet50"
+onnxtr_bin_thresh = 0.2    # library default 0.3
+onnxtr_box_thresh = 0.05   # library default 0.1
+onnxtr_unclip_ratio = 2.0  # library default 1.5
+
+# ── Surya: needs its own venv (pins pillow<11 and an exact opencv) ──────────
+surya_device = "cuda" # cpu | cuda
+surya_min_confidence = 0.0
+
+# ── VLM over any OpenAI-compatible endpoint ─────────────────────────────────
+# Hosted API, or a locally served model (see the vllm-* services in
+# docker-compose.yml). Grounding coordinates are known to drift between runs
+# and a box 20px off leaks PHI, so use a VLM as an ensemble member that boosts
+# recall, not as the only source of geometry — and characterise its output with
+# test/probe_vlm_grounding.py before trusting vlm_coord_space.
+vlm_model = "gpt-5.4-mini"
+vlm_base_url = ""            # empty = hosted OpenAI; e.g. "http://vllm-glm-ocr:8000/v1"
+vlm_api_key_env = "OPENAI_API_KEY"
+vlm_prompt = ""              # empty = the built-in prompt for vlm_response_format
+vlm_response_format = "json" # json | deepseek_grounding
+vlm_coord_space = ""         # empty = the format's default; pixel | normalized_999 | normalized_1
+vlm_box_dilate_px = 24       # extra slack absorbing grounding drift
+vlm_max_side_px = 2048
+vlm_timeout_s = 120.0
+vlm_confidence = 1.0
+
+# ── Ensemble: union of several engines' detections ──────────────────────────
+# The union-find merge collapses the boxes members agree on. Keep
+# ocr_min_confidence at 0.0 and use the per-member floors instead: a
+# recognition softmax, a detector box score and a constant are not comparable,
+# so one global threshold mutes whichever member scores conservatively.
+ensemble_engines = []         # e.g. ["easyocr", "rapidocr", "onnxtr"]
+ensemble_min_confidences = [] # same length as ensemble_engines, or empty
+ensemble_fail_mode = "warn"   # warn (skip a failing member) | raise
 
 # ── OCR preprocessing (applied to the OCR input only, never to the output) ──
 # Ordered subset of ["grayscale", "clahe", "invert", "tophat", "blackhat",
