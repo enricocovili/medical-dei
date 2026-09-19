@@ -215,3 +215,60 @@ ellipse_axis_y_ratio = 0.25
 max_box_area_px = 0
 max_box_area_ratio = 0.25
 deid_padding_px = 20
+
+# ── CLAHE strength ──────────────────────────────────────────────────────────
+# Measured on the four hardest panoramics: the gentle default (clip 2, 128px
+# tiles) recovers nothing, while clip 40 with 16px tiles takes recall from
+# 0.429 to 0.667 there. The text in those images is dark blue or green on near
+# black -- present, but far below what a detector reacts to until the local
+# contrast is pushed hard.
+[[variant]]
+name = "onnxtr_clahe_strong"
+ocr_engine = "onnxtr"
+preprocess_steps = ["grayscale", "clahe"]
+clahe_clip_limit = 40.0
+clahe_tile_px = 16
+
+[[variant]]
+name = "onnxtr_clahe_mid"
+ocr_engine = "onnxtr"
+preprocess_steps = ["grayscale", "clahe"]
+clahe_clip_limit = 20.0
+clahe_tile_px = 32
+
+[[variant]]
+name = "easyocr_clahe_strong"
+preprocess_steps = ["grayscale", "clahe"]
+clahe_clip_limit = 40.0
+clahe_tile_px = 16
+
+[[variant]]
+name = "rapidocr_clahe_strong"
+ocr_engine = "rapidocr"
+preprocess_steps = ["grayscale", "clahe"]
+clahe_clip_limit = 40.0
+clahe_tile_px = 16
+
+# Union of the raw image and two contrast-enhanced views of it.
+[[variant]]
+name = "onnxtr_clahe_ensemble"
+ocr_engine = "onnxtr"
+preprocess_variants = [
+    [],
+    ["grayscale", "clahe"],
+]
+clahe_clip_limit = 40.0
+clahe_tile_px = 16
+
+[[variant]]
+name = "ensemble_geo3_clahe_strong"
+ocr_engine = "ensemble"
+ensemble_engines = ["easyocr", "rapidocr", "onnxtr"]
+preprocess_steps = ["grayscale", "clahe"]
+clahe_clip_limit = 40.0
+clahe_tile_px = 16
+deid_padding_px = 20
+ellipse_axis_x_ratio = 0.35
+ellipse_axis_y_ratio = 0.25
+max_box_area_px = 0
+max_box_area_ratio = 0.25
