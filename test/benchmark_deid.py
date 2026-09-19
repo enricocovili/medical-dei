@@ -157,6 +157,13 @@ class CachingEngine:
         return list(detections)
 
 
+# print() block-buffers when stdout is redirected to a file, so a multi-hour
+# sweep shows no variant results until it finishes while the logging output
+# (which flushes per record) keeps scrolling — it looks stalled. Flush instead.
+def _print(*args: Any, **kwargs: Any) -> None:
+    print(*args, flush=True, **kwargs)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Benchmark deidentification config variants against ground truth."
@@ -429,7 +436,7 @@ def run_variant(
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
-    print(
+    _print(
         f"    recall_covered={metrics['recall_covered']:.4f} "
         f"recall_iou={metrics['recall_iou']:.4f} "
         f"image_level_recall={metrics['image_level_recall']:.4f} "
@@ -531,10 +538,10 @@ def main() -> int:
             }
         artifacts_root = out_root / dataset_name
 
-        print(f"\n########## Dataset: {dataset_name} ##########")
-        print(f"  images      : {crops_dir}")
-        print(f"  ground truth: {ground_truth_path}")
-        print(
+        _print(f"\n########## Dataset: {dataset_name} ##########")
+        _print(f"  images      : {crops_dir}")
+        _print(f"  ground truth: {ground_truth_path}")
+        _print(
             f"  GT boxes    : {sum(len(v) for v in ground_truth.values())} "
             f"across {sum(1 for v in ground_truth.values() if v)} images "
             f"({len(image_sizes)} images on disk)"
@@ -604,7 +611,7 @@ def main() -> int:
             csv_row["overrides"] = json.dumps(row.get("overrides", {}))
             writer.writerow(csv_row)
 
-    print(f"\nSummaries written under {out_root}")
+    _print(f"\nSummaries written under {out_root}")
     return 0
 
 
