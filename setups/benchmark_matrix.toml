@@ -27,9 +27,13 @@ ground_truth = "imgs/sam3_processed_panoramic/test_dataset_text_groundtruth.json
 name = "teleradiography"
 images_dir = "imgs/teleradiography_with_text"
 ground_truth = "imgs/teleradiography_with_text/groundtruth.json"
-# 33 of the 99 images have no GT entry. images_dir makes them count as clean
-# (so they contribute to clean_image_fp_rate) rather than vanishing entirely;
-# if any of them actually do contain unannotated text, that rate is pessimistic.
+# 33 of the 99 images have no GT entry, and 19 of those 33 demonstrably DO
+# contain text (EasyOCR reads dates and names in them). They are unannotated,
+# not verified text-free, so scoring predictions on them as false positives
+# would punish correct detections. annotated_only restricts the metrics to the
+# 66 annotated images; the cost is that this dataset cannot measure the
+# clean-image false-positive rate at all, since every annotated image has text.
+annotated_only = true
 
 # ── The number everything else is measured against ──────────────────────────
 [[variant]]

@@ -200,3 +200,12 @@ de-identification benchmark that is the wrong direction to err.
 
 If `panoramic_patient_4835` is confirmed mis-annotated, re-annotate or remove
 those six shapes; the reported recall ceiling rises accordingly.
+
+**Teleradiography ground truth is incomplete.** 33 of the 99 images have no
+entry at all, and 19 of those 33 demonstrably do contain text — EasyOCR reads
+dates and names in them. They are unannotated, not verified text-free. The
+matrix therefore sets `annotated_only = true` for that dataset, restricting the
+metrics to the 66 annotated images; the consequence is that teleradiography
+cannot measure the clean-image false-positive rate at all, because every
+annotated image contains text. Annotating those 33 would both restore that
+measurement and raise the true PHI count the pipeline is scored against.

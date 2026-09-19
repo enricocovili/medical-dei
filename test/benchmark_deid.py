@@ -550,6 +550,21 @@ def main() -> int:
             blank_gt = []
 
         image_sizes = build_image_size_index(crops_dir)
+        # A dataset whose ground truth covers only some of its images cannot
+        # support the clean-image false-positive rate: an image absent from the
+        # ground truth is "not annotated", not "verified text-free". On
+        # teleradiography, 19 of the 33 unannotated images do contain text
+        # (EasyOCR reads dates and names in them), so counting them as clean
+        # would score correct detections as false positives.
+        if dataset.get("annotated_only"):
+            annotated = set(ground_truth)
+            image_sizes = {k: v for k, v in image_sizes.items() if k in annotated}
+            if postprocess_records is not None:
+                postprocess_records = [
+                    record
+                    for record in postprocess_records
+                    if Path(record["name"]).stem in annotated
+                ]
         if postprocess_records is not None and args.limit:
             processed = {Path(record["name"]).stem for record in postprocess_records}
             image_sizes = {

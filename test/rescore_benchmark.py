@@ -121,6 +121,14 @@ def main() -> int:
                 ground_truth, build_image_index(images_dir)
             )
         image_sizes = build_image_size_index(images_dir)
+        annotated_only = bool(from_matrix.get(dataset, {}).get("annotated_only"))
+        annotated = set(ground_truth)
+        if annotated_only:
+            # Mirror the sweep: images absent from the ground truth are
+            # unannotated, not verified text-free (see the matrix comment).
+            # Predictions on them must be dropped too, or evaluate() pulls them
+            # back into the image universe via the prediction keys.
+            image_sizes = {k: v for k, v in image_sizes.items() if k in annotated}
         total_gt = sum(len(boxes) for boxes in ground_truth.values())
         print(
             f"=== {dataset}: {total_gt} GT boxes "
@@ -133,6 +141,12 @@ def main() -> int:
             variant = records_path.parent.parent.name
             records = load_json(records_path)
             predictions = parse_predictions(records, min_confidence=0.0)
+            if annotated_only:
+                predictions = {
+                    image: boxes
+                    for image, boxes in predictions.items()
+                    if image in annotated
+                }
             overrides = by_variant.get(variant, {}).get("overrides", {})
             ellipse = EllipseParams(
                 axis_x_ratio=float(overrides.get("ellipse_axis_x_ratio", 0.45)),
