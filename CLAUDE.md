@@ -171,3 +171,32 @@ postprocess stage rotates and crops, which invalidates the annotations.
 
 Detections are memoised on the exact pixels handed to the engine, so variants that
 change only post-filtering replay in milliseconds instead of re-running OCR.
+
+## Data-quality findings (verified by inspection)
+
+Some ground-truth boxes annotate regions that contain no text, so no OCR can
+ever match them and they silently cap every variant's recall.
+
+**Provably blank — filtered automatically.** 8 of 81 panoramic and 2 of 136
+teleradiography boxes have a single uniform pixel value (solid 255 or solid 0),
+five of them in `panoramic_patient_2158`. `test_accuracy.filter_blank_gt`
+drops these by default and logs each one; `--keep-blank-gt` restores them. The
+ground-truth file is never modified.
+
+**Suspected annotation error — NOT filtered.** All six boxes in
+`panoramic_patient_4835` (a 6000x4000 photographed scan) cover flat brown
+regions with p98-p2 contrast of 10-14 and std 2-4. Pushing them to a full-range
+stretch plus CLAHE clip 40 reveals sensor noise and no glyphs, so they look
+like a misaligned or stale annotation. They are left in the ground truth on
+purpose: they account for 6 of the 17 boxes the best configuration misses, and
+removing them without confirmation would flatter the results.
+
+There is no reliable automatic test for this second class, which is why it is
+not filtered. A blur-based structure score was tried and rejected: noise-only
+regions score 13-30 and genuinely faint text scores 20-26, with ordinary text
+reaching as low as 11.8 — the distributions overlap completely, so any
+threshold that removed the noise would also remove real PHI. For a
+de-identification benchmark that is the wrong direction to err.
+
+If `panoramic_patient_4835` is confirmed mis-annotated, re-annotate or remove
+those six shapes; the reported recall ceiling rises accordingly.
