@@ -15,6 +15,7 @@ import argparse
 import csv
 import json
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -53,19 +54,62 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--coverage-threshold", type=float, default=0.5)
     parser.add_argument("--keep-blank-gt", action="store_true")
     parser.add_argument("--sort", default="recall_covered")
+    parser.add_argument(
+        "--matrix",
+        type=Path,
+        default=REPO_ROOT / "setups/benchmark_matrix.toml",
+        help="Used to locate a dataset's images when its sweep has not finished.",
+    )
     return parser.parse_args()
+
+
+def _matrix_datasets(matrix_path: Path) -> Dict[str, Dict[str, Any]]:
+    if not matrix_path.exists():
+        return {}
+    matrix = tomllib.loads(matrix_path.read_text(encoding="utf-8"))
+    entries = matrix.get("dataset") or []
+    return {str(entry.get("name", "default")): entry for entry in entries}
+
+
+def _resolve(path_str: str) -> Path:
+    path = Path(path_str)
+    return path if path.is_absolute() else (REPO_ROOT / path).resolve()
 
 
 def main() -> int:
     args = parse_args()
-    for summary_path in sorted(args.results_root.glob("*/summary.json")):
-        dataset_dir = summary_path.parent
+    from_matrix = _matrix_datasets(args.matrix)
+
+    # A dataset's summary.json only appears once its sweep finishes, so fall
+    # back to the matrix for one that is still running (or was interrupted) --
+    # its per-variant records are already on disk and perfectly scoreable.
+    dataset_dirs = sorted(
+        d for d in args.results_root.iterdir()
+        if d.is_dir() and any(d.glob("*/deidentification/records.json"))
+    )
+    for dataset_dir in dataset_dirs:
         dataset = dataset_dir.name
         if args.dataset and dataset not in args.dataset:
             continue
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        images_dir = Path(summary["images_dir"])
-        ground_truth_path = Path(summary["ground_truth"])
+        summary_path = dataset_dir / "summary.json"
+        if summary_path.exists():
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            images_dir = Path(summary["images_dir"])
+            ground_truth_path = Path(summary["ground_truth"])
+        elif dataset in from_matrix:
+            entry = from_matrix[dataset]
+            images_dir = _resolve(str(entry.get("images_dir") or entry["crops_dir"]))
+            ground_truth_path = _resolve(str(entry["ground_truth"]))
+            summary = {
+                "dataset": dataset,
+                "images_dir": str(images_dir),
+                "ground_truth": str(ground_truth_path),
+                "partial": True,
+            }
+            print(f"(no summary.json for {dataset}; using the matrix — sweep still running?)")
+        else:
+            print(f"(skipping {dataset}: no summary.json and no matching [[dataset]])")
+            continue
 
         ground_truth, degenerate = filter_degenerate_gt(
             parse_ground_truth(load_json(ground_truth_path)),
@@ -83,7 +127,7 @@ def main() -> int:
             f"(dropped {len(degenerate)} degenerate, {len(blank)} blank)"
         )
 
-        by_variant = {row["variant"]: row for row in summary["rows"]}
+        by_variant = {row["variant"]: row for row in summary.get("rows", [])}
         rows: List[Dict[str, Any]] = []
         for records_path in sorted(dataset_dir.glob("*/deidentification/records.json")):
             variant = records_path.parent.parent.name

@@ -23,6 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "test"))
 
 from test_accuracy import (  # noqa: E402
+    build_image_index,
+    filter_blank_gt,
     filter_degenerate_gt,
     gt_union_coverage_ratio,
     load_json,
@@ -46,6 +48,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--variants", nargs="*", default=None)
     parser.add_argument("--ground-truth", type=Path, default=None)
+    parser.add_argument(
+        "--images-dir",
+        type=Path,
+        default=None,
+        help="Defaults to the dataset's image folder; used to drop blank GT boxes.",
+    )
+    parser.add_argument("--keep-blank-gt", action="store_true")
     parser.add_argument(
         "--coverage-threshold",
         type=float,
@@ -72,6 +81,16 @@ def main() -> int:
     args = parse_args()
     gt_path = args.ground_truth or REPO_ROOT / DATASET_GROUND_TRUTH[args.dataset]
     ground_truth, _ = filter_degenerate_gt(parse_ground_truth(load_json(gt_path)))
+    # Match the benchmark's filtering, or the denominators disagree.
+    if not args.keep_blank_gt:
+        images_dir = args.images_dir or gt_path.parent / (
+            "imgs" if args.dataset == "panoramic" else "."
+        )
+        ground_truth, blank = filter_blank_gt(
+            ground_truth, build_image_index(images_dir)
+        )
+        if blank:
+            print(f"(dropped {len(blank)} blank GT boxes over uniform pixels)")
     total_gt = sum(len(boxes) for boxes in ground_truth.values())
 
     dataset_root = args.results_root / args.dataset

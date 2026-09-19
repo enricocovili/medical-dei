@@ -272,3 +272,26 @@ ellipse_axis_x_ratio = 0.35
 ellipse_axis_y_ratio = 0.25
 max_box_area_px = 0
 max_box_area_ratio = 0.25
+
+# ── Candidate shipping configs ──────────────────────────────────────────────
+# The overlap analysis showed every engine's detections are nested subsets of
+# the others: the 3-engine ensemble finds nothing EasyOCR or OnnxTR missed, and
+# its apparent advantage came from its post-filter settings. These pair the
+# best single engine with those settings, to separate the two effects.
+[[variant]]
+name = "onnxtr_clahe_recall_max"
+ocr_engine = "onnxtr"
+preprocess_steps = ["grayscale", "clahe"]
+deid_padding_px = 20
+ellipse_axis_x_ratio = 0.35
+ellipse_axis_y_ratio = 0.25
+max_box_area_px = 0
+max_box_area_ratio = 0.25
+
+[[variant]]
+name = "easyocr_recall_max"
+deid_padding_px = 20
+ellipse_axis_x_ratio = 0.35
+ellipse_axis_y_ratio = 0.25
+max_box_area_px = 0
+max_box_area_ratio = 0.25
