@@ -225,6 +225,35 @@ def test_degenerate_gt_filter() -> None:
     check(len(kept["a"]) == 1 and len(dropped) == 1, "sub-pixel GT box is filtered out")
 
 
+def test_blank_gt_filter(tmp_dir: Path = Path("/tmp")) -> None:
+    """A GT box over uniform pixels is unfindable by any OCR, so scoring against
+    it measures nothing. The test looks only at the image, never at a
+    prediction, so it is not "the model missed it, therefore ignore it"."""
+    import tempfile
+
+    import cv2
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "img.png"
+        image = np.zeros((100, 200), dtype=np.uint8)
+        image[10:20, 10:60] = 255  # a bright patch: real content
+        cv2.imwrite(str(path), image)
+
+        ground_truth = {
+            "img": [
+                (10.0, 10.0, 60.0, 20.0),  # over the patch -> kept
+                (100.0, 50.0, 160.0, 70.0),  # over flat black -> dropped
+            ]
+        }
+        kept, dropped = ta.filter_blank_gt(ground_truth, {"img": path})
+        check(len(kept["img"]) == 1, "GT over real content is kept")
+        check(len(dropped) == 1, "GT over uniform pixels is dropped")
+        check(
+            ta.filter_blank_gt(ground_truth, {})[0]["img"] == ground_truth["img"],
+            "no image available -> nothing is dropped",
+        )
+
+
 def test_coverage_vs_iou() -> None:
     """A fully covered GT box inside a much larger redaction box is a perfect
     anonymization result but a sub-threshold IoU. The coverage metric must see

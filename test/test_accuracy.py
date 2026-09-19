@@ -74,6 +74,14 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of a GT box that must be covered for it to count as detected.",
     )
     parser.add_argument(
+        "--keep-blank-gt",
+        action="store_true",
+        help=(
+            "Score against GT boxes whose pixels are uniform (already-blanked "
+            "regions no OCR can find). Off by default; requires --images-dir."
+        ),
+    )
+    parser.add_argument(
         "--min-gt-side-px",
         type=float,
         default=1.0,
@@ -489,6 +497,50 @@ def build_image_size_index(image_dir: Path | None) -> Dict[str, Tuple[int, int]]
     return sizes
 
 
+def filter_blank_gt(
+    ground_truth: Dict[str, List[Rect]],
+    image_index: Dict[str, Path],
+    min_std: float = 0.0,
+) -> Tuple[Dict[str, List[Rect]], List[Tuple[str, Rect]]]:
+    """Drop GT rectangles whose pixels are a single uniform value.
+
+    Some regions were annotated as text and then blanked before the images were
+    handed over: 8 of the 81 panoramic boxes are solid 255 or solid 0, five of
+    them in one image. No OCR engine can find text in a constant-valued region,
+    so scoring against them measures nothing and silently caps recall at 0.901.
+
+    This is not circular reasoning of the "the model missed it, so ignore it"
+    kind: the test is a property of the pixels alone and never looks at any
+    prediction. The PHI in those regions is already gone, which is precisely
+    why they are blank.
+
+    The ground-truth file is never modified; dropped shapes are returned so the
+    caller can report them.
+    """
+    kept: Dict[str, List[Rect]] = {}
+    dropped: List[Tuple[str, Rect]] = []
+    for image, rects in ground_truth.items():
+        path = image_index.get(image)
+        gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE) if path is not None else None
+        keep: List[Rect] = []
+        for rect in rects:
+            if gray is None:
+                keep.append(rect)
+                continue
+            height, width = gray.shape[:2]
+            x1 = max(0, int(rect[0]))
+            y1 = max(0, int(rect[1]))
+            x2 = min(width, int(rect[2]) + 1)
+            y2 = min(height, int(rect[3]) + 1)
+            crop = gray[y1:y2, x1:x2]
+            if crop.size and float(crop.std()) <= min_std:
+                dropped.append((image, rect))
+            else:
+                keep.append(rect)
+        kept[image] = keep
+    return kept, dropped
+
+
 def filter_degenerate_gt(
     ground_truth: Dict[str, List[Rect]], min_side_px: float = 1.0
 ) -> Tuple[Dict[str, List[Rect]], List[Tuple[str, Rect]]]:
@@ -791,6 +843,20 @@ def main() -> None:
     images_dir = args.images_dir or args.cropped_image_dir
     image_sizes = build_image_size_index(images_dir)
 
+    blank_gt: List[Tuple[str, Rect]] = []
+    if images_dir is not None and not args.keep_blank_gt:
+        ground_truth, blank_gt = filter_blank_gt(
+            ground_truth, build_image_index(images_dir)
+        )
+        for image, rect in blank_gt:
+            print(
+                f"WARNING: dropped blank GT box in {image}: "
+                f"{rect[2] - rect[0]:.0f}x{rect[3] - rect[1]:.0f} px of uniform "
+                "pixels — the region was annotated as text and then blanked, so "
+                "no OCR can find it. Pass --keep-blank-gt to score against it "
+                "anyway. The ground-truth file was NOT modified."
+            )
+
     images_with_not_fully_covered: List[str] = []
     not_fully_covered_count_by_image: Dict[str, int] = {}
 
@@ -835,6 +901,7 @@ def main() -> None:
         ),
     )
     metrics["degenerate_gt_dropped"] = len(dropped_gt)
+    metrics["blank_gt_dropped"] = len(blank_gt)
 
     for image_stats in metrics["per_image"]:
         image = image_stats["image"]

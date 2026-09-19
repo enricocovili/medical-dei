@@ -40,7 +40,9 @@ sys.path.insert(0, str(REPO_ROOT / "test"))
 import app as pipeline_app  # noqa: E402
 from test_accuracy import (  # noqa: E402
     EllipseParams,
+    build_image_index,
     build_image_size_index,
+    filter_blank_gt,
     evaluate,
     filter_degenerate_gt,
     load_json,
@@ -191,6 +193,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Override the matrix [base] iou_threshold.",
+    )
+    parser.add_argument(
+        "--keep-blank-gt",
+        action="store_true",
+        help="Score against GT boxes whose pixels are uniform (already blanked).",
     )
     parser.add_argument(
         "--save-images",
@@ -525,6 +532,23 @@ def main() -> int:
         # from the denominators). Under --limit only a subset is processed, so
         # the universe must shrink with it or the clean-image FP rate is
         # diluted by images no variant ever saw.
+        # Drop GT boxes whose pixels are uniform: those regions were annotated
+        # as text and then blanked before hand-over, so no engine can find them
+        # and scoring against them just caps every variant's recall.
+        if not args.keep_blank_gt:
+            ground_truth, blank_gt = filter_blank_gt(
+                ground_truth, build_image_index(crops_dir)
+            )
+            for image, rect in blank_gt:
+                logging.warning(
+                    "dropped blank GT box in %s: %.0fx%.0f px of uniform pixels",
+                    image,
+                    rect[2] - rect[0],
+                    rect[3] - rect[1],
+                )
+        else:
+            blank_gt = []
+
         image_sizes = build_image_size_index(crops_dir)
         if postprocess_records is not None and args.limit:
             processed = {Path(record["name"]).stem for record in postprocess_records}
@@ -581,6 +605,7 @@ def main() -> int:
             "iou_threshold": iou_threshold,
             "min_gt_side_px": min_gt_side_px,
             "degenerate_gt_dropped": len(dropped),
+            "blank_gt_dropped": len(blank_gt),
             "image_limit": args.limit,
             "git_commit": _git_commit(),
             "rows": rows,
