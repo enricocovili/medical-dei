@@ -49,6 +49,10 @@ services:
               capabilities: [gpu]
 
     # ── Environment variables ──────────────────────────────────────────────
+    # Docker creates a missing bind-mount source as root. Running as the host
+    # user keeps thesis/thesis_data_out writable from the host afterwards.
+    user: "${UID:-1000}:${GID:-1000}"
+
     environment:
       # Hugging Face access token — required for SAM3 model weights download on
       # the first run. Set in shell or in a .env file alongside docker-compose.yml.
@@ -82,6 +86,10 @@ services:
       # PaddleOCR (PP-OCRv5) model weights, downloaded on first paddle run.
       - paddlex-model-cache:/root/.paddlex
 
+      # RapidOCR (PP-OCRv6 ONNX) and OnnxTR (DBNet) weights.
+      - rapidocr-model-cache:/root/.rapidocr
+      - onnxtr-model-cache:/root/.cache/onnxtr
+
       # Test/benchmark scripts and benchmark outputs; mounted so harness edits
       # and sweep results don't require image rebuilds.
       - ./test:/app/test
@@ -89,6 +97,104 @@ services:
 
     # Default command (matches Dockerfile CMD); override on the CLI as needed.
     command: ["python", "pipeline/app.py", "--verbose"]
+
+  # ── VLM OCR backends ───────────────────────────────────────────────────────
+  # Each model gets its own container because their dependencies are mutually
+  # unsatisfiable: DeepSeek-OCR-2 pins torch==2.6.0 (which predates sm_120, so
+  # it cannot run on a Blackwell card at all) and transformers==4.46.3, while
+  # GLM-OCR needs transformers>=5.3.0. Behind an OpenAI-compatible HTTP API
+  # they coexist, the pipeline image gains no dependencies, and the model stays
+  # resident across benchmark variants instead of reloading per run.
+  #
+  # Start one at a time (they each want the whole GPU):
+  #     docker compose up -d vllm-deepseek-ocr2
+  #     docker compose run --rm pipeline python test/probe_vlm_grounding.py \
+  #         --base-url http://vllm-deepseek-ocr2:8000/v1 \
+  #         --model deepseek-ocr2 --image imgs/sam3_processed_panoramic/imgs/<x>.jpg
+  #
+  # Then point the pipeline at it in setups/pipeline_config.toml:
+  #     ocr_engine = "vlm"
+  #     vlm_base_url = "http://vllm-deepseek-ocr2:8000/v1"
+  #     vlm_model = "deepseek-ocr2"
+  #     vlm_response_format = "deepseek_grounding"
+  # ...but verify vlm_coord_space with probe_vlm_grounding.py first: published
+  # reviews report VLM grounding coordinates drifting between runs, and a box
+  # 20px off leaks PHI.
+
+  vllm-deepseek-ocr2:
+    image: vllm/vllm-openai:latest
+    profiles: ["vlm"]
+    ports: ["8000:8000"]
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - vllm-model-cache:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: >
+      --model deepseek-ai/DeepSeek-OCR-2
+      --served-model-name deepseek-ocr2
+      --trust-remote-code
+      --no-enable-prefix-caching
+      --mm-processor-cache-gb 0
+      --max-model-len 8192
+
+  vllm-glm-ocr:
+    image: vllm/vllm-openai:latest
+    profiles: ["vlm"]
+    ports: ["8001:8000"]
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - vllm-model-cache:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # ~4.5 GB of weights; the bbox output format is undocumented everywhere, so
+    # characterise it with test/probe_vlm_grounding.py before wiring a parser.
+    command: >
+      --model zai-org/GLM-OCR
+      --served-model-name glm-ocr
+      --trust-remote-code
+      --max-model-len 8192
+      --gpu-memory-utilization 0.5
+
+  vllm-paddleocr-vl:
+    image: vllm/vllm-openai:latest
+    profiles: ["vlm"]
+    ports: ["8002:8000"]
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - vllm-model-cache:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # 0.9B, Apache-2.0, and its text-spotting head emits 4-point quadrilaterals,
+    # which map 1:1 onto OcrDetection.quad — the best-documented grounding of
+    # the three, so try this one first.
+    command: >
+      --model PaddlePaddle/PaddleOCR-VL
+      --served-model-name paddleocr-vl
+      --trust-remote-code
+      --max-model-len 8192
+
 
 # ── Named volumes ──────────────────────────────────────────────────────────
 # Docker manages these directories; they survive container removal.
@@ -98,3 +204,6 @@ volumes:
   hf-model-cache:
   easyocr-model-cache:
   paddlex-model-cache:
+  rapidocr-model-cache:
+  onnxtr-model-cache:
+  vllm-model-cache:

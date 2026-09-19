@@ -55,25 +55,19 @@ import test_accuracy as ta  # noqa: E402
 # CONFIGURATION  --  edit paths here if the dataset lives elsewhere
 # =============================================================================
 
-OUT_DIR = REPO_ROOT / "test" / "thesis_data_out"
+# Must match the docker-compose bind mount and benchmark_matrix.toml out_root.
+OUT_DIR = REPO_ROOT / "thesis" / "thesis_data_out"
 FIG_DIR = REPO_ROOT / "thesis" / "images" / "distributions"
 MARGIN_PX = 5.0  # same tolerance used in the thesis / test_accuracy
 
-# Reference de-identification parameters (mirror setups/pipeline_config.toml).
+# Reference parameters are read from setups/pipeline_config.toml rather than
+# mirrored here: the previous hand-written copy drifted out of sync and, since
+# PipelineConfig is a frozen dataclass with no defaults, every task in this file
+# died with a TypeError the moment a config key was added.
 REF = dict(
-    prompt="rectangular panoramic scan",
-    fallback_prompt="",
-    kernel_size=9,
-    iterations=5,
-    large_bb_area_ratio=0.1,
-    easyocr_langs=["en", "it"],
-    easyocr_gpu=True,
-    merge_distance_px=10,
-    max_box_area_px=120000,
     ellipse_axis_x_ratio=0.45,
     ellipse_axis_y_ratio=0.35,
     ellipse_proximity_px=0.0,
-    deid_padding_px=10,
 )
 
 # Per-modality dataset layout.
@@ -87,24 +81,16 @@ DATASETS: dict[str, dict[str, Path]] = {
         / "imgs"
         / "sam3_processed_panoramic"
         / "test_dataset_text_groundtruth.json",
-        "raw_dir": REPO_ROOT / "imgs" / "bkps" / "scans" / "panoramic",
+        # No separate raw set exists in this checkout; the GT is annotated on
+        # these images and the masks match them pixel for pixel.
+        "raw_dir": REPO_ROOT / "imgs" / "sam3_processed_panoramic" / "imgs",
+        "masks_dir": REPO_ROOT / "imgs" / "sam3_processed_panoramic" / "masks",
     },
     "teleradiography": {
-        "crops_dir": REPO_ROOT
-        / "imgs"
-        / "telerad_tests"
-        / "teleradiography_results_3"
-        / "postprocess"
-        / "crops",
-        "gt_json": REPO_ROOT
-        / "imgs"
-        / "telerad_tests"
-        / "teleradiography_results_3"
-        / "groundtruth.json",
-        "raw_dir": REPO_ROOT
-        / "imgs"
-        / "telerad_tests"
-        / "teleradiography_with_text",
+        "crops_dir": REPO_ROOT / "imgs" / "teleradiography_with_text",
+        "gt_json": REPO_ROOT / "imgs" / "teleradiography_with_text" / "groundtruth.json",
+        "raw_dir": REPO_ROOT / "imgs" / "teleradiography_with_text",
+        "masks_dir": None,
     },
 }
 
@@ -118,29 +104,27 @@ _DIMS_CACHE: dict[str, tuple[int, int]] = {}
 # =============================================================================
 
 def _make_config(artifacts_dir: Path, **overrides: Any) -> PipelineConfig:
-    """Build a valid in-memory PipelineConfig from REF + overrides."""
-    params = {**REF, **overrides}
-    return PipelineConfig(
-        run_mode=params.get("run_mode", "deidentification"),
-        input_path=params.get("input_path", artifacts_dir),
-        output_json=params.get("output_json", artifacts_dir / "results.json"),
-        artifacts_dir=artifacts_dir,
-        save_artifacts=params.get("save_artifacts", False),
-        prompt=params["prompt"],
-        fallback_prompt=params["fallback_prompt"] or None,
-        kernel_size=params["kernel_size"],
-        iterations=params["iterations"],
-        large_bb_area_ratio=params["large_bb_area_ratio"],
-        easyocr_langs=params["easyocr_langs"],
-        easyocr_gpu=params["easyocr_gpu"],
-        save_deidentified_dir=None,
-        merge_distance_px=params["merge_distance_px"],
-        max_box_area_px=params["max_box_area_px"],
-        ellipse_axis_x_ratio=params["ellipse_axis_x_ratio"],
-        ellipse_axis_y_ratio=params["ellipse_axis_y_ratio"],
-        ellipse_proximity_px=params["ellipse_proximity_px"],
-        deid_padding_px=params["deid_padding_px"],
+    """Build a PipelineConfig from the live TOML plus overrides.
+
+    Going through build_config_from_dict rather than calling the frozen
+    dataclass directly means a new config key can never break this file again:
+    PipelineConfig has no field defaults, so the old hand-written constructor
+    raised TypeError as soon as the schema grew.
+    """
+    section: dict[str, Any] = dict(pipeline_app._load_pipeline_section())
+    section.update(
+        {
+            "run_mode": "deidentification",
+            "artifacts_dir": str(artifacts_dir),
+            "output_json": str(artifacts_dir / "results.json"),
+            "save_artifacts": False,
+        }
     )
+    for key, value in overrides.items():
+        # max_box_area_px = None is meaningful (no cap), so it must survive.
+        if value is not None or key == "max_box_area_px":
+            section[key] = 0 if (value is None and key == "max_box_area_px") else value
+    return pipeline_app.build_config_from_dict(section)
 
 
 def _list_crops(crops_dir: Path, gt_keys: set[str] | None) -> list[Path]:
@@ -208,66 +192,65 @@ def _load_crops_in_memory(crops: list[Path]) -> dict[str, Any]:
     return loaded
 
 
-def _touches_ref_ellipse(rect: ta.Rect, w: int, h: int) -> bool:
-    """Replicate EasyOcrDeidentifier._touches_center_ellipse for the ref ellipse."""
-    if w <= 0 or h <= 0:
-        return False
-    cx, cy = w / 2.0, h / 2.0
-    ax = max(1.0, w * REF["ellipse_axis_x_ratio"] + REF["ellipse_proximity_px"])
-    ay = max(1.0, h * REF["ellipse_axis_y_ratio"] + REF["ellipse_proximity_px"])
-    x1, y1, x2, y2 = rect
-    nx = min(max(cx, x1), x2)
-    ny = min(max(cy, y1), y2)
-    return ((nx - cx) / ax) ** 2 + ((ny - cy) / ay) ** 2 <= 1.0
-
-
 def evaluate(
     records: list[dict[str, Any]],
     gt_raw: dict[str, Any],
     *,
     crops_by_stem: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
-    """Compute coverage / FP metrics for a set of prediction records."""
+    """Coverage / false-positive metrics, delegated to test_accuracy.
+
+    This used to be a second implementation of the same metrics (plus its own
+    copy of the ellipse test). It now calls the shared one, so the thesis
+    tables and the benchmark sweep can never disagree, and the legacy key names
+    are mapped from the canonical ones below.
+    """
     preds = ta.parse_predictions(records, min_confidence=0.0)
-    gts = ta.parse_ground_truth(gt_raw)
-    images = sorted(set(gts) | set(preds))
-
-    gt_total = fully = uncovered = 0
-    cov_sum = 0.0
-    pred_total = outside_fp = central_fp = 0
-    per_region_cov: list[float] = []
-
-    for image in images:
-        p = preds.get(image, [])
-        g = gts.get(image, [])
-        for gbox in g:
-            cov = ta.gt_best_coverage_ratio(gbox, p, MARGIN_PX)
-            per_region_cov.append(cov)
-            cov_sum += cov
-            if cov >= 0.999999:
-                fully += 1
-            if cov <= 0.0:
-                uncovered += 1
-        gt_total += len(g)
-        pred_total += len(p)
-        outside_fp += sum(
-            1 for pb in p if ta.pred_is_outside_ground_truth(pb, g, MARGIN_PX)
+    gts, dropped = ta.filter_degenerate_gt(ta.parse_ground_truth(gt_raw))
+    for image, rect in dropped:
+        _LOG.warning(
+            "dropped degenerate GT box in %s: %.3fx%.3f px",
+            image,
+            rect[2] - rect[0],
+            rect[3] - rect[1],
         )
-        if crops_by_stem is not None and image in crops_by_stem:
-            w, h = _img_dims(crops_by_stem[image])
-            central_fp += sum(1 for pb in p if _touches_ref_ellipse(pb, w, h))
 
+    image_sizes: dict[str, tuple[int, int]] = {}
+    if crops_by_stem is not None:
+        image_sizes = {stem: _img_dims(path) for stem, path in crops_by_stem.items()}
+        image_sizes = {k: v for k, v in image_sizes.items() if v != (0, 0)}
+
+    metrics = ta.evaluate(
+        preds,
+        gts,
+        MARGIN_PX,
+        image_sizes=image_sizes,
+        ellipse=ta.EllipseParams(
+            axis_x_ratio=REF["ellipse_axis_x_ratio"],
+            axis_y_ratio=REF["ellipse_axis_y_ratio"],
+            proximity_px=REF["ellipse_proximity_px"],
+        ),
+    )
     return {
-        "gt_total": gt_total,
-        "pred_total": pred_total,
-        "cov_mean": cov_sum / gt_total if gt_total else 0.0,
-        "fully_covered": fully,
-        "fully_rate": fully / gt_total if gt_total else 0.0,
-        "uncovered": uncovered,
-        "outside_fp": outside_fp,
-        "outside_rate": outside_fp / pred_total if pred_total else 0.0,
-        "central_fp": central_fp,
-        "per_region_cov": per_region_cov,
+        # Legacy names the LaTeX writers below already use.
+        "gt_total": metrics["total_gt"],
+        "pred_total": metrics["total_pred"],
+        "cov_mean": metrics["gt_coverage_score"],
+        "fully_covered": metrics["fully_covered"],
+        "fully_rate": metrics["gt_full_coverage_rate"],
+        "uncovered": metrics["uncovered"],
+        "outside_fp": metrics["outside_gt_fp"],
+        "outside_rate": metrics["outside_gt_fp_rate"],
+        "central_fp": metrics["central_fp"],
+        "per_region_cov": metrics["per_region_coverage"],
+        # Metrics the shared implementation adds.
+        "cov_mean_union": metrics["gt_union_coverage_score"],
+        "fully_rate_union": metrics["gt_full_coverage_rate_union"],
+        "recall_covered": metrics["recall_covered"],
+        "image_level_recall": metrics["image_level_recall"],
+        "clean_image_fp_rate": metrics["clean_image_fp_rate"],
+        "central_over_redaction": metrics["central_over_redaction"],
+        "redacted_area_fraction": metrics["redacted_area_fraction_global"],
     }
 
 
@@ -295,11 +278,12 @@ def task_ablation(gt_only: bool = True) -> dict[str, Any]:
             print(f"  [skip] {name}: no crops at {ds['crops_dir']}")
             continue
         cbs = _crops_by_stem(crops)
-        # ON = reference ratios; OFF = tiny ellipse so nothing is excluded.
+        # ON = reference ratios; OFF = the exclusion genuinely disabled.
+        # The old "OFF" arm set the ratios to 0.001, which still discarded any
+        # detection overlapping the exact image centre, so it understated what
+        # the exclusion costs.
         rec_on = run_deid(crops)
-        rec_off = run_deid(
-            crops, ellipse_axis_x_ratio=0.001, ellipse_axis_y_ratio=0.001
-        )
+        rec_off = run_deid(crops, ellipse_enabled=False)
         m_on = evaluate(rec_on, gt_raw, crops_by_stem=cbs)
         m_off = evaluate(rec_off, gt_raw, crops_by_stem=cbs)
         rows[name] = {"on": m_on, "off": m_off}
@@ -325,8 +309,14 @@ def task_sensitivity(gt_only: bool = True) -> dict[str, Any]:
         return {}
     sweeps = {
         "merge_distance_px": [5, 10, 20],
+        # None means "no cap"; _make_config maps it to the 0 sentinel.
         "max_box_area_px": [60000, 120000, None],
-        "deid_padding_px": [0, 10, 20],
+        # Padding is recall insurance paid for in over-redacted pixels, so the
+        # table reports redacted_area_fraction next to coverage.
+        "deid_padding_px": [0, 10, 20, 30],
+        # The exclusion zone costs 8 of 81 panoramic GT boxes at the reference
+        # ratios; this row is what quantifies the trade against anatomy FPs.
+        "ellipse_enabled": [True, False],
     }
     results: dict[str, Any] = {}
     for param, values in sweeps.items():
@@ -337,7 +327,10 @@ def task_sensitivity(gt_only: bool = True) -> dict[str, Any]:
             results[param][str(v)] = m
             print(
                 f"  {param}={str(v):>8s}  cov={m['cov_mean']:.3f}  "
-                f"outside={m['outside_rate']:.3f}"
+                f"recall_covered={m['recall_covered']:.3f}  "
+                f"outside={m['outside_rate']:.3f}  "
+                f"central_fp={m['central_fp']}  "
+                f"area={m['redacted_area_fraction']:.4f}"
             )
     _write_latex_sensitivity(results)
     return results
