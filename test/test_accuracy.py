@@ -248,6 +248,31 @@ def gt_best_coverage_ratio(
     return best
 
 
+def gt_union_coverage_ratio(
+    gt_box: Rect, pred_boxes: List[Rect], margin_px: float
+) -> float:
+    """Fraction of a GT box covered by the UNION of all predictions.
+
+    gt_best_coverage_ratio takes the max over a single prediction, which
+    understates redaction: a detector that splits one text line into two
+    adjacent boxes covering it completely scores ~0.7 there, even though every
+    PHI pixel is blacked out. For anonymization the union is the correct notion,
+    so the safety metrics (recall_covered, image_level_recall) use this one.
+    gt_best_coverage_ratio is kept for continuity of the original metric.
+    """
+    gt_area = rect_area(gt_box)
+    if gt_area <= 0:
+        return 0.0
+    gx1, gy1, gx2, gy2 = gt_box
+    clipped: List[Rect] = []
+    for pred_box in pred_boxes:
+        px1, py1, px2, py2 = expand_rect(pred_box, margin_px)
+        rect = (max(px1, gx1), max(py1, gy1), min(px2, gx2), min(py2, gy2))
+        if rect[2] > rect[0] and rect[3] > rect[1]:
+            clipped.append(rect)
+    return min(1.0, union_area(clipped) / gt_area)
+
+
 def pred_is_outside_ground_truth(
     pred_box: Rect, gt_boxes: List[Rect], margin_px: float
 ) -> bool:
@@ -530,6 +555,8 @@ def evaluate(
     fully_covered_gt_boxes = 0
     uncovered_gt_boxes = 0
     gt_coverage_sum = 0.0
+    gt_union_coverage_sum = 0.0
+    fully_covered_union_boxes = 0
     total_pred_boxes = 0
     outside_gt_fp_boxes = 0
     per_image: List[Dict] = []
@@ -561,18 +588,27 @@ def evaluate(
         gts = ground_truth.get(image, [])
 
         image_coverage_sum = 0.0
+        image_union_coverage_sum = 0.0
         image_fully_covered = 0
+        image_fully_covered_union = 0
         image_detected = 0
         image_uncovered = 0
         for gt_box in gts:
             coverage = gt_best_coverage_ratio(gt_box, preds, margin_px)
+            union_coverage = gt_union_coverage_ratio(gt_box, preds, margin_px)
             per_region_coverage.append(coverage)
             image_coverage_sum += coverage
+            image_union_coverage_sum += union_coverage
             if coverage >= 0.999999:
                 image_fully_covered += 1
-            if coverage >= coverage_threshold:
+            # The safety metrics use union coverage: what matters is whether
+            # every PHI pixel ended up under some redaction box, not whether a
+            # single box did all the work.
+            if union_coverage >= 0.999999:
+                image_fully_covered_union += 1
+            if union_coverage >= coverage_threshold:
                 image_detected += 1
-            if coverage <= 0.0:
+            if union_coverage <= 0.0:
                 image_uncovered += 1
 
         image_outside_fp = sum(
@@ -590,7 +626,7 @@ def evaluate(
         # so an image only counts as safe when *every* GT box is fully covered.
         if gts:
             images_with_gt += 1
-            if image_fully_covered == len(gts):
+            if image_fully_covered_union == len(gts):
                 images_fully_safe += 1
             else:
                 leak_images.append(image)
@@ -636,14 +672,16 @@ def evaluate(
                 "gt_count": len(gts),
                 "pred_count": len(preds),
                 "mean_gt_coverage": safe_div(image_coverage_sum, len(gts)),
+                "mean_gt_union_coverage": safe_div(image_union_coverage_sum, len(gts)),
                 "fully_covered": image_fully_covered,
+                "fully_covered_union": image_fully_covered_union,
                 "detected": image_detected,
                 "uncovered": image_uncovered,
                 "outside_gt_fp": image_outside_fp,
                 "tp": image_tp,
                 "fp": len(preds) - image_tp,
                 "fn": len(gts) - image_tp,
-                "fully_safe": bool(gts) and image_fully_covered == len(gts),
+                "fully_safe": bool(gts) and image_fully_covered_union == len(gts),
                 "central_fp": image_central_fp,
                 "central_over_redaction": image_central_over_redaction,
                 "redacted_area": image_redacted_area,
@@ -654,6 +692,8 @@ def evaluate(
 
         total_gt_boxes += len(gts)
         fully_covered_gt_boxes += image_fully_covered
+        fully_covered_union_boxes += image_fully_covered_union
+        gt_union_coverage_sum += image_union_coverage_sum
         detected_gt_boxes += image_detected
         uncovered_gt_boxes += image_uncovered
         gt_coverage_sum += image_coverage_sum
@@ -679,6 +719,13 @@ def evaluate(
         "outside_gt_fp_rate": safe_div(outside_gt_fp_boxes, total_pred_boxes),
         "per_image": per_image,
         # --- coverage recall: the right recall notion for redaction ---
+        # Union-based: a GT box counts as covered when the predictions TOGETHER
+        # cover it, which is what actually determines whether PHI is hidden.
+        "gt_union_coverage_score": safe_div(gt_union_coverage_sum, total_gt_boxes),
+        "fully_covered_union": fully_covered_union_boxes,
+        "gt_full_coverage_rate_union": safe_div(
+            fully_covered_union_boxes, total_gt_boxes
+        ),
         "coverage_threshold": coverage_threshold,
         "detected_gt": detected_gt_boxes,
         "recall_covered": safe_div(detected_gt_boxes, total_gt_boxes),
@@ -845,6 +892,12 @@ def main() -> None:
         f"Recall (covered): {metrics['recall_covered']:.4f}  "
         f"({metrics['detected_gt']}/{metrics['total_gt']})"
     )
+    print(
+        f"Fully covered   : {metrics['gt_full_coverage_rate_union']:.4f}  "
+        f"({metrics['fully_covered_union']}/{metrics['total_gt']})"
+    )
+    print(f"Mean coverage   : {metrics['gt_union_coverage_score']:.4f}")
+    print("(union of all predictions; the single-box variant is reported above)")
     print()
     print(
         f"=== Detection metrics (one-to-one, IoU >= {metrics['iou_threshold']:.2f}) ==="

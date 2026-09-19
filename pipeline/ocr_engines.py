@@ -36,6 +36,83 @@ def parse_quad_results(raw_results: Any) -> list[OcrDetection]:
     return parsed
 
 
+def rect_to_quad(x1: float, y1: float, x2: float, y2: float) -> list[list[int]]:
+    return [
+        [int(round(x1)), int(round(y1))],
+        [int(round(x2)), int(round(y1))],
+        [int(round(x2)), int(round(y2))],
+        [int(round(x1)), int(round(y2))],
+    ]
+
+
+def to_rgb(image: np.ndarray) -> np.ndarray:
+    """Normalise an engine's input to a contiguous 3-channel RGB array.
+
+    Engines receive whatever the preprocess chain emitted, which is 2-D whenever
+    the chain contains "grayscale"; and TiledStrategy hands out non-contiguous
+    slices, which several backends mishandle.
+    """
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    return np.ascontiguousarray(image)
+
+
+@dataclass(frozen=True, slots=True)
+class EnsembleMember:
+    engine: OcrEngine
+    # Per-member floor. A single global ocr_min_confidence cannot work across an
+    # ensemble: EasyOCR reports a recognition softmax, a DB detector a box
+    # score, a detection-only engine a constant — they are not commensurable,
+    # and one threshold would mute whichever member scores conservatively.
+    min_confidence: float = 0.0
+
+
+class EnsembleOcrEngine:
+    """Union of several engines' detections.
+
+    Recall-first: different architectures fail on different images, so the union
+    finds more text than any member alone. The Deidentifier's union-find merge
+    then collapses the near-duplicates that members agree on.
+
+    A member that raises is logged and skipped rather than failing the whole
+    run, unless fail_mode is "raise".
+    """
+
+    def __init__(self, members: list[EnsembleMember], *, fail_mode: str = "warn") -> None:
+        if not members:
+            raise ValueError("ensemble requires at least one member engine")
+        if fail_mode not in {"warn", "raise"}:
+            raise ValueError("ensemble fail_mode must be 'warn' or 'raise'")
+        self._members = members
+        self._fail_mode = fail_mode
+        self.name = "ensemble[" + "+".join(m.engine.name for m in members) + "]"
+
+    def detect(self, image: np.ndarray) -> list[OcrDetection]:
+        detections: list[OcrDetection] = []
+        for member in self._members:
+            try:
+                found = member.engine.detect(image)
+            except Exception as exc:  # noqa: BLE001 — one bad member must not lose the rest
+                if self._fail_mode == "raise":
+                    raise
+                _logger.warning(
+                    "ensemble member '%s' failed: %s: %s",
+                    member.engine.name,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+            kept = [det for det in found if det.confidence >= member.min_confidence]
+            _logger.debug(
+                "ensemble member '%s': %d detections (%d above its floor)",
+                member.engine.name,
+                len(found),
+                len(kept),
+            )
+            detections.extend(kept)
+        return detections
+
+
 @dataclass(frozen=True, slots=True)
 class EasyOcrParams:
     text_threshold: float = 0.5

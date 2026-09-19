@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import subprocess
@@ -29,6 +30,8 @@ import traceback
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import Any, Dict, List
+
+import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "pipeline"))
@@ -61,9 +64,12 @@ SUMMARY_METRIC_KEYS = [
     "outside_gt_fp",
     "total_pred",
     "outside_gt_fp_rate",
-    # Coverage recall: the right recall notion for redaction.
+    # Coverage recall: the right recall notion for redaction (union-based).
     "recall_covered",
     "detected_gt",
+    "gt_full_coverage_rate_union",
+    "fully_covered_union",
+    "gt_union_coverage_score",
     # Literature-comparable detection metrics (they penalise the intentional
     # over-redaction, so expect them to read low).
     "recall_iou",
@@ -90,8 +96,9 @@ MARKDOWN_HEADERS = [
     "variant",
     "status",
     "recall_covered",
+    "gt_full_coverage_rate_union",
     "image_level_recall",
-    "gt_coverage_score",
+    "gt_union_coverage_score",
     "recall_iou",
     "gt_full_coverage_rate",
     "uncovered",
@@ -107,7 +114,47 @@ MARKDOWN_HEADERS = [
 ENGINE_FIELD_PREFIX = {
     "easyocr": "easyocr_",
     "paddleocr": "paddleocr_",
+    "rapidocr": "rapidocr_",
+    "surya": "surya_",
+    "onnxtr": "onnxtr_",
+    "vlm": "vlm_",
 }
+
+
+class CachingEngine:
+    """Memoises detect() on the exact pixels it is handed.
+
+    Most variants in the matrix change only post-filtering (ellipse, area cap,
+    padding, confidence, text filter) and feed the engine byte-identical arrays.
+    Without this, a sweep re-runs OCR once per variant: on CPU that is ~22s an
+    image, so the 23-variant matrix would spend most of a day recomputing
+    detections it already had. Different preprocessing or tiling produces
+    different bytes and therefore misses the cache, which is exactly right.
+
+    Only the detections are retained, never the images.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.name = inner.name
+        self._cache: Dict[bytes, Any] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def detect(self, image: Any) -> Any:
+        contiguous = np.ascontiguousarray(image)
+        key = (
+            hashlib.blake2b(contiguous.tobytes(), digest_size=16).digest()
+            + repr((contiguous.shape, contiguous.dtype.str)).encode()
+        )
+        cached = self._cache.get(key)
+        if cached is not None:
+            self.hits += 1
+            return list(cached)
+        self.misses += 1
+        detections = self._inner.detect(contiguous)
+        self._cache[key] = detections
+        return list(detections)
 
 
 def parse_args() -> argparse.Namespace:
@@ -156,8 +203,7 @@ def _hashable(value: Any) -> Any:
     return tuple(value) if isinstance(value, list) else value
 
 
-def _engine_cache_key(config: Any) -> tuple:
-    name = config.ocr_engine
+def _single_engine_key(config: Any, name: str) -> tuple:
     prefix = ENGINE_FIELD_PREFIX.get(name)
     if prefix is None:
         raise ValueError(
@@ -173,6 +219,20 @@ def _engine_cache_key(config: Any) -> tuple:
             if field.name.startswith(prefix)
         ),
     )
+
+
+def _engine_cache_key(config: Any) -> tuple:
+    if config.ocr_engine == "ensemble":
+        return (
+            "ensemble",
+            tuple(
+                _single_engine_key(config, member)
+                for member in config.ensemble_engines
+            ),
+            tuple(config.ensemble_min_confidences),
+            config.ensemble_fail_mode,
+        )
+    return _single_engine_key(config, config.ocr_engine)
 
 
 def _records_from_images_dir(images_dir: Path, limit: int | None) -> List[Dict[str, Any]]:
@@ -251,6 +311,8 @@ def _write_dataset_summary(
         "mean_time_s",
         "wall_time_s",
         "images",
+        "engine_calls",
+        "engine_cache_hits",
         "overrides",
     ]
     with (out_dir / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -306,8 +368,9 @@ def run_variant(
         key = _engine_cache_key(config)
         engine = engine_cache.get(key)
         if engine is None:
-            engine = pipeline_app.build_ocr_engine(logger, config)
+            engine = CachingEngine(pipeline_app.build_ocr_engine(logger, config))
             engine_cache[key] = engine
+        hits_before, misses_before = engine.hits, engine.misses
         deidentifier = pipeline_app.build_deidentifier(logger, config, engine=engine)
         records = pipeline_app.run_deidentification_stage(
             artifacts,
@@ -357,6 +420,8 @@ def run_variant(
     row["mean_time_s"] = sum(stage_times) / len(stage_times) if stage_times else 0.0
     row["wall_time_s"] = wall_time
     row["images"] = len(records)
+    row["engine_calls"] = engine.misses - misses_before
+    row["engine_cache_hits"] = engine.hits - hits_before
 
     # Persist the full metrics next to the predictions so thesis figures can be
     # regenerated without re-running OCR.
@@ -371,7 +436,8 @@ def run_variant(
         f"coverage={metrics['gt_coverage_score']:.4f} "
         f"clean_fp={metrics['clean_image_fp_rate']:.4f} "
         f"area={metrics['redacted_area_fraction_global']:.4f} "
-        f"mean_time={row['mean_time_s']:.2f}s"
+        f"mean_time={row['mean_time_s']:.2f}s "
+        f"(engine calls={row['engine_calls']}, cached={row['engine_cache_hits']})"
     )
     return row, metrics
 
@@ -511,6 +577,8 @@ def main() -> int:
         "mean_time_s",
         "wall_time_s",
         "images",
+        "engine_calls",
+        "engine_cache_hits",
         "overrides",
     ]
     with (out_root / "summary_all.csv").open("w", newline="", encoding="utf-8") as handle:

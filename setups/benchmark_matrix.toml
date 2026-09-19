@@ -154,3 +154,64 @@ preprocess_variants = [
     ["grayscale", "clahe"],
     ["grayscale", "tophat", "percentile_stretch"],
 ]
+
+# ── Alternative detectors ───────────────────────────────────────────────────
+# RapidOCR runs the PP-OCRv6 DB detector over ONNX Runtime (no paddlepaddle, so
+# it is not blocked by the missing sm_120 wheels). OnnxTR is DBNet/ResNet-50 —
+# same runtime, different backbone and training set, so its errors decorrelate.
+[[variant]]
+name = "rapidocr"
+ocr_engine = "rapidocr"
+
+[[variant]]
+name = "rapidocr_loose"
+ocr_engine = "rapidocr"
+rapidocr_box_thresh = 0.15
+rapidocr_thresh = 0.15
+rapidocr_unclip_ratio = 2.5
+
+[[variant]]
+name = "onnxtr"
+ocr_engine = "onnxtr"
+
+# OnnxTR is the cheapest engine here (~1.4 s/image on CPU), so the
+# preprocessing hypothesis is tested against it rather than against EasyOCR.
+[[variant]]
+name = "onnxtr_clahe"
+ocr_engine = "onnxtr"
+preprocess_steps = ["grayscale", "clahe"]
+
+[[variant]]
+name = "onnxtr_tophat"
+ocr_engine = "onnxtr"
+preprocess_steps = ["grayscale", "tophat", "percentile_stretch"]
+
+[[variant]]
+name = "onnxtr_upscale2x"
+ocr_engine = "onnxtr"
+ocr_upscale_factor = 2.0
+
+[[variant]]
+name = "onnxtr_preprocess_ensemble"
+ocr_engine = "onnxtr"
+preprocess_variants = [
+    [],
+    ["grayscale", "clahe"],
+    ["grayscale", "tophat", "percentile_stretch"],
+]
+
+# ── Ensemble: the union of three architectures (CRAFT, PP-OCR DB, DBNet/R50) ─
+[[variant]]
+name = "ensemble_geo3"
+ocr_engine = "ensemble"
+ensemble_engines = ["easyocr", "rapidocr", "onnxtr"]
+
+[[variant]]
+name = "ensemble_geo3_recall_max"
+ocr_engine = "ensemble"
+ensemble_engines = ["easyocr", "rapidocr", "onnxtr"]
+ellipse_axis_x_ratio = 0.35
+ellipse_axis_y_ratio = 0.25
+max_box_area_px = 0
+max_box_area_ratio = 0.25
+deid_padding_px = 20

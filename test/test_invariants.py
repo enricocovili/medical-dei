@@ -204,6 +204,21 @@ def test_union_area() -> None:
     )
 
 
+def test_union_coverage() -> None:
+    """A detector that splits one text line into two adjacent boxes still hides
+    every PHI pixel; max-over-single-prediction coverage says otherwise."""
+    gt_box = (0.0, 0.0, 100.0, 10.0)
+    halves = [(0.0, 0.0, 50.0, 10.0), (50.0, 0.0, 100.0, 10.0)]
+    single = ta.gt_best_coverage_ratio(gt_box, halves, 0.0)
+    union = ta.gt_union_coverage_ratio(gt_box, halves, 0.0)
+    check(abs(single - 0.5) < 1e-9, "max-over-single coverage sees only half")
+    check(abs(union - 1.0) < 1e-9, "union coverage sees the whole box")
+
+    metrics = ta.evaluate({"i": halves}, {"i": [gt_box]}, margin_px=0.0)
+    check(metrics["gt_full_coverage_rate_union"] == 1.0, "union metric counts it covered")
+    check(metrics["image_level_recall"] == 1.0, "image counts as fully protected")
+
+
 def test_degenerate_gt_filter() -> None:
     gt = {"a": [(0.0, 0.0, 27.0, 0.029), (0.0, 0.0, 90.0, 14.0)]}
     kept, dropped = ta.filter_degenerate_gt(gt, min_side_px=1.0)
