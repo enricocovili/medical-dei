@@ -25,7 +25,7 @@ large_bb_area_ratio = 0.1
 # are a nested subset of the others'.
 ocr_engine = "onnxtr"
 easyocr_langs = ["en", "it"]
-easyocr_gpu = false
+easyocr_gpu = true # falls back to CPU with a warning when no GPU is usable
 save_deidentified_dir = ""
 
 # Minimum per-detection confidence; detections below are discarded (0.0 = keep all)
