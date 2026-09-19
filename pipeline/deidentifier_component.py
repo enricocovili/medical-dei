@@ -24,11 +24,22 @@ REDACTION_MODES = {"outline", "fill"}
 class DeidentifierParams:
     merge_distance_px: int = 10
     max_box_area_px: int | None = 120000
+    # Relative twin of max_box_area_px, as a fraction of the image area. The cap
+    # exists to reject "the engine returned the whole image", which is inherently
+    # relative: an absolute 120000 px2 is generous on a panoramic and smaller
+    # than 13 real text regions on a teleradiograph. None disables it.
+    max_box_area_ratio: float | None = None
+    # False disables the central keep-out entirely. Previously the only way to
+    # turn it off was to set the ratios to ~0.001, which still excluded anything
+    # overlapping the exact image centre.
+    ellipse_enabled: bool = True
     center_ellipse_axes_ratio: tuple[float, float] = (0.35, 0.25)
     ellipse_proximity_px: float = 0.0
     padding_px: int = 3
     min_confidence: float = 0.0
-    redaction_mode: str = "outline"  # outline (debug) | fill (real anonymization)
+    # fill is the real anonymization; outline only draws debug rectangles and
+    # leaves the text readable underneath, so it must never be the default.
+    redaction_mode: str = "fill"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +93,7 @@ class Deidentifier:
         strategy: ResolutionStrategy | None = None,
         classifier: RedactionClassifier | None = None,
         preprocess: Callable[[np.ndarray], np.ndarray] | None = None,
+        preprocess_variants: list[Callable[[np.ndarray], np.ndarray] | None] | None = None,
         dual_pass_invert: bool = False,
     ) -> None:
         self._engine = engine
@@ -89,6 +101,13 @@ class Deidentifier:
         self._strategy = strategy or FullImageStrategy()
         self._classifier = classifier or RedactAllClassifier()
         self._preprocess = preprocess
+        # Each variant is an independent preprocessing chain; the engine runs
+        # once per variant and the detections are unioned. This is the cheapest
+        # recall lever available — one model, N passes — and it generalises the
+        # old dual_pass_invert flag, which was a hardcoded union over exactly
+        # {identity, invert}. Every chain must be coordinate-preserving, so all
+        # the boxes land in the same space (see ocr_preprocess).
+        self._preprocess_variants = preprocess_variants
         self._dual_pass_invert = dual_pass_invert
         if self._params.merge_distance_px < 0:
             raise ValueError("merge_distance_px must be >= 0")
@@ -104,6 +123,11 @@ class Deidentifier:
             raise ValueError("ellipse_proximity_px must be >= 0")
         if self._params.padding_px < 0:
             raise ValueError("padding_px must be >= 0")
+        if (
+            self._params.max_box_area_ratio is not None
+            and not 0.0 < self._params.max_box_area_ratio <= 1.0
+        ):
+            raise ValueError("max_box_area_ratio must be in (0, 1] or None")
         if not 0.0 <= self._params.min_confidence <= 1.0:
             raise ValueError("min_confidence must be in [0, 1]")
         if self._params.redaction_mode not in REDACTION_MODES:
@@ -134,11 +158,23 @@ class Deidentifier:
         if self._preprocess is not None:
             read_target = self._preprocess(read_target)
 
-        raw = self._strategy.detect(self._engine, read_target)
+        # read_target fixes the coordinate space for everything downstream
+        # (the ellipse test below measures against its shape), so every variant
+        # must preserve width and height.
+        variants: list[np.ndarray] = []
+        if self._preprocess_variants:
+            for variant in self._preprocess_variants:
+                variants.append(
+                    read_target if variant is None else variant(read_target)
+                )
+        else:
+            variants.append(read_target)
         if self._dual_pass_invert:
-            raw = raw + self._strategy.detect(
-                self._engine, cv2.bitwise_not(read_target)
-            )
+            variants.extend(cv2.bitwise_not(variant) for variant in list(variants))
+
+        raw: list[OcrDetection] = []
+        for variant_image in variants:
+            raw.extend(self._strategy.detect(self._engine, variant_image))
 
         confident = [
             det for det in raw if det.confidence >= self._params.min_confidence
@@ -183,6 +219,8 @@ class Deidentifier:
         )
 
     def _touches_center_ellipse(self, rect: Rect, image_shape: tuple[int, ...]) -> bool:
+        if not self._params.ellipse_enabled:
+            return False
         image_h, image_w = image_shape[:2]
         cx, cy = image_w / 2.0, image_h / 2.0
         axis_x = max(
@@ -207,12 +245,16 @@ class Deidentifier:
         self, detections: list[OcrDetection], image_shape: tuple[int, ...]
     ) -> list[OcrDetection]:
         filtered: list[OcrDetection] = []
+        image_h, image_w = image_shape[:2]
+        area_limit: float | None = self._params.max_box_area_px
+        if self._params.max_box_area_ratio is not None:
+            relative_limit = self._params.max_box_area_ratio * image_h * image_w
+            area_limit = (
+                relative_limit if area_limit is None else min(area_limit, relative_limit)
+            )
         for det in detections:
             rect = _bbox_to_rect(det.quad)
-            if (
-                self._params.max_box_area_px is not None
-                and _rect_area(rect) > self._params.max_box_area_px
-            ):
+            if area_limit is not None and _rect_area(rect) > area_limit:
                 continue
             if self._touches_center_ellipse(rect, image_shape):
                 continue

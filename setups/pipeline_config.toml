@@ -1,9 +1,10 @@
 [pipeline]
 run_mode = "deidentification" # full | sam3 | postprocess | deidentification | report
 
-input_path = "imgs/output/postprocess/crops"
-output_json = "imgs/output/results.json"
-artifacts_dir = "imgs/output/"
+input_path = "imgs/sam3_processed_panoramic/imgs"
+output_json = "artifacts/panoramic/results.json"
+# Pipeline output lives outside imgs/, which is the (gitignored) INPUT tree.
+artifacts_dir = "artifacts/panoramic"
 save_artifacts = true # set to false in production to skip intermediate image files
 prompt = "rectangular panoramic scan"
 fallback_prompt = "" # second SAM3 prompt tried when no boxes found on first pass; leave empty to skip
@@ -15,7 +16,7 @@ large_bb_area_ratio = 0.1
 # ── OCR engine ───────────────────────────────────────────────────────────────
 ocr_engine = "easyocr" # easyocr | paddleocr
 easyocr_langs = ["en", "it"]
-easyocr_gpu = true
+easyocr_gpu = false
 save_deidentified_dir = ""
 
 # Minimum per-detection confidence; detections below are discarded (0.0 = keep all)
@@ -33,10 +34,40 @@ paddleocr_det_model = "PP-OCRv5_mobile_det"
 paddleocr_rec_model = "PP-OCRv5_mobile_rec"
 
 # ── OCR preprocessing (applied to the OCR input only, never to the output) ──
-preprocess_steps = [] # ordered subset of ["grayscale", "clahe", "invert"]
+# Ordered subset of ["grayscale", "clahe", "invert", "tophat", "blackhat",
+# "percentile_stretch", "gamma", "unsharp"]. Every step must preserve the image
+# dimensions -- scaling lives in ocr_upscale_factor below, because the box
+# coordinates and the ellipse test are measured in this image's space.
+preprocess_steps = []
+
+# Several independent chains; the engine runs once per chain and the detections
+# are unioned. One model, N passes -- the cheapest recall lever available.
+# Empty = just use preprocess_steps. Example:
+#   preprocess_variants = [[], ["grayscale", "clahe"], ["grayscale", "tophat"]]
+preprocess_variants = []
+
 clahe_clip_limit = 2.0
+# Target CLAHE tile edge in pixels; the grid is derived per image. The dataset
+# spans 512x248 to 6343x2713, so the old fixed grid below meant 64px tiles on
+# one image and 793px on another -- effectively global equalisation against a
+# 14px-tall median text box. Set clahe_tile_px = 0 to use the fixed grid.
+clahe_tile_px = 128
 clahe_tile_grid_size = 8
+
+morph_kernel_px = 21 # tophat/blackhat kernel; should exceed the text stroke width
+stretch_low_pct = 1.0
+stretch_high_pct = 99.0
+preprocess_gamma = 0.5
+unsharp_sigma = 2.0
+unsharp_amount = 1.5
+
 ocr_dual_pass_invert = false # also OCR the inverted image and union detections
+
+# Enlarges the OCR input and maps the boxes back, so small low-contrast text is
+# seen at higher resolution. Composes with resolution_strategy = "tiled".
+# With easyocr, raise easyocr_canvas_size too or it downscales the gain away.
+ocr_upscale_factor = 1.0
+ocr_upscale_interpolation = "cubic" # cubic | lanczos | linear | nearest
 
 # ── Resolution strategy ──────────────────────────────────────────────────────
 resolution_strategy = "full" # full | tiled
@@ -49,11 +80,25 @@ text_filter = "none" # none | short_text (skip detections <= short_text_max_char
 short_text_max_chars = 2
 
 # ── Redaction output ─────────────────────────────────────────────────────────
-redaction_mode = "outline" # outline (debug boxes) | fill (real anonymization)
+redaction_mode = "fill" # fill (real anonymization) | outline (debug boxes only:
+                        # draws rectangles and leaves the PHI readable underneath)
 record_raw_detections = false # also store raw + skipped detections in records.json
 
 merge_distance_px = 10
+
+# Reject "the engine returned the whole image". Measured against the ground
+# truth, the absolute cap alone discards 13 of 136 real teleradiography text
+# regions, so prefer the relative one (fraction of image area; 0 = disabled).
 max_box_area_px = 120000
+max_box_area_ratio = 0.0
+
+# Central keep-out zone: detections overlapping it are dropped, to stop the OCR
+# hallucinating on tooth shapes. The half-axes are fractions of the FULL width
+# and height, so 0.45/0.35 spans 5%-95% horizontally and 15%-85% vertically --
+# nearly the whole image. Measured cost of that setting: 8 of 81 panoramic and
+# 16 of 136 teleradiography GT text boxes are discarded before OCR can find
+# them. See the ellipse ablation in setups/benchmark_matrix.toml.
+ellipse_enabled = true
 ellipse_axis_x_ratio = 0.45
 ellipse_axis_y_ratio = 0.35
 ellipse_proximity_px = 0.0

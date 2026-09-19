@@ -36,8 +36,15 @@ try:
         build_easyocr_engine,
         build_paddle_engine,
     )
-    from .ocr_preprocess import apply_chain, validate_steps
-    from .ocr_strategies import RESOLUTION_STRATEGIES, TiledStrategy
+    from .ocr_preprocess import PreprocessParams, apply_chain, validate_steps
+    from .ocr_strategies import (
+        RESOLUTION_STRATEGIES,
+        UPSCALE_INTERPOLATIONS,
+        FullImageStrategy,
+        ResolutionStrategy,
+        TiledStrategy,
+        UpscaleStrategy,
+    )
     from .report_writer import JsonReportWriter
     from .sam3_component import Sam3ImageSegmenter
     from .text_classifiers import TEXT_FILTERS, build_classifier
@@ -64,8 +71,15 @@ except ImportError:
         build_easyocr_engine,
         build_paddle_engine,
     )
-    from ocr_preprocess import apply_chain, validate_steps
-    from ocr_strategies import RESOLUTION_STRATEGIES, TiledStrategy
+    from ocr_preprocess import PreprocessParams, apply_chain, validate_steps
+    from ocr_strategies import (
+        RESOLUTION_STRATEGIES,
+        UPSCALE_INTERPOLATIONS,
+        FullImageStrategy,
+        ResolutionStrategy,
+        TiledStrategy,
+        UpscaleStrategy,
+    )
     from report_writer import JsonReportWriter
     from sam3_component import Sam3ImageSegmenter
     from text_classifiers import TEXT_FILTERS, build_classifier
@@ -93,6 +107,8 @@ class PipelineConfig:
     save_deidentified_dir: Path | None
     merge_distance_px: int
     max_box_area_px: int | None
+    max_box_area_ratio: float | None
+    ellipse_enabled: bool
     ellipse_axis_x_ratio: float
     ellipse_axis_y_ratio: float
     ellipse_proximity_px: float
@@ -108,9 +124,19 @@ class PipelineConfig:
     paddleocr_det_model: str
     paddleocr_rec_model: str
     preprocess_steps: list[str]
+    preprocess_variants: list[list[str]]
     clahe_clip_limit: float
     clahe_tile_grid_size: int
+    clahe_tile_px: int
+    morph_kernel_px: int
+    stretch_low_pct: float
+    stretch_high_pct: float
+    preprocess_gamma: float
+    unsharp_sigma: float
+    unsharp_amount: float
     ocr_dual_pass_invert: bool
+    ocr_upscale_factor: float
+    ocr_upscale_interpolation: str
     resolution_strategy: str
     tile_size_px: int
     tile_overlap_px: int
@@ -316,6 +342,36 @@ def build_config_from_dict(config: dict[str, object]) -> PipelineConfig:
     preprocess_steps = _optional_str_list(config, "preprocess_steps")
     validate_steps(preprocess_steps)
 
+    # A list of independent preprocessing chains; the engine runs once per chain
+    # and the detections are unioned. Empty means "just preprocess_steps".
+    variants_raw = config.get("preprocess_variants")
+    preprocess_variants: list[list[str]] = []
+    if variants_raw is not None:
+        if not isinstance(variants_raw, list):
+            raise ValueError(
+                "Config key 'preprocess_variants' must be a list of step lists"
+            )
+        for entry in variants_raw:
+            if not isinstance(entry, list):
+                raise ValueError(
+                    "Each entry of 'preprocess_variants' must be a list of step names"
+                )
+            steps = [str(step).strip().lower() for step in entry]
+            validate_steps(steps)
+            preprocess_variants.append(steps)
+
+    area_ratio_raw = config.get("max_box_area_ratio")
+    if area_ratio_raw is None:
+        max_box_area_ratio = None
+    elif isinstance(area_ratio_raw, (int, float)) and not isinstance(
+        area_ratio_raw, bool
+    ):
+        max_box_area_ratio = None if area_ratio_raw <= 0 else float(area_ratio_raw)
+        if max_box_area_ratio is not None and max_box_area_ratio > 1.0:
+            raise ValueError("Config key 'max_box_area_ratio' must be <= 1.0")
+    else:
+        raise ValueError("Config key 'max_box_area_ratio' must be a number or null")
+
     return PipelineConfig(
         run_mode=run_mode,
         input_path=_resolve_path(_require_str(config, "input_path")),
@@ -332,6 +388,8 @@ def build_config_from_dict(config: dict[str, object]) -> PipelineConfig:
         save_deidentified_dir=_optional_path(config, "save_deidentified_dir"),
         merge_distance_px=_require_int(config, "merge_distance_px"),
         max_box_area_px=max_box_area_px,
+        max_box_area_ratio=max_box_area_ratio,
+        ellipse_enabled=_optional_bool(config, "ellipse_enabled", True),
         ellipse_axis_x_ratio=_require_float(config, "ellipse_axis_x_ratio"),
         ellipse_axis_y_ratio=_require_float(config, "ellipse_axis_y_ratio"),
         ellipse_proximity_px=_require_float(config, "ellipse_proximity_px"),
@@ -351,9 +409,21 @@ def build_config_from_dict(config: dict[str, object]) -> PipelineConfig:
         paddleocr_rec_model=_optional_str(config, "paddleocr_rec_model")
         or "PP-OCRv5_mobile_rec",
         preprocess_steps=preprocess_steps,
+        preprocess_variants=preprocess_variants,
         clahe_clip_limit=_optional_float(config, "clahe_clip_limit", 2.0),
         clahe_tile_grid_size=_optional_int(config, "clahe_tile_grid_size", 8),
+        clahe_tile_px=_optional_int(config, "clahe_tile_px", 128),
+        morph_kernel_px=_optional_int(config, "morph_kernel_px", 21),
+        stretch_low_pct=_optional_float(config, "stretch_low_pct", 1.0),
+        stretch_high_pct=_optional_float(config, "stretch_high_pct", 99.0),
+        preprocess_gamma=_optional_float(config, "preprocess_gamma", 0.5),
+        unsharp_sigma=_optional_float(config, "unsharp_sigma", 2.0),
+        unsharp_amount=_optional_float(config, "unsharp_amount", 1.5),
         ocr_dual_pass_invert=_optional_bool(config, "ocr_dual_pass_invert", False),
+        ocr_upscale_factor=_optional_float(config, "ocr_upscale_factor", 1.0),
+        ocr_upscale_interpolation=_optional_choice(
+            config, "ocr_upscale_interpolation", "cubic", set(UPSCALE_INTERPOLATIONS)
+        ),
         resolution_strategy=_optional_choice(
             config, "resolution_strategy", "full", RESOLUTION_STRATEGIES
         ),
@@ -363,7 +433,7 @@ def build_config_from_dict(config: dict[str, object]) -> PipelineConfig:
         text_filter=_optional_choice(config, "text_filter", "none", TEXT_FILTERS),
         short_text_max_chars=_optional_int(config, "short_text_max_chars", 2),
         redaction_mode=_optional_choice(
-            config, "redaction_mode", "outline", REDACTION_MODES
+            config, "redaction_mode", "fill", REDACTION_MODES
         ),
         record_raw_detections=_optional_bool(config, "record_raw_detections", False),
     )
@@ -430,6 +500,20 @@ def build_ocr_engine(logger: PipelineEventLogger, config: PipelineConfig) -> Ocr
     return engine
 
 
+def build_preprocess_params(config: PipelineConfig) -> PreprocessParams:
+    return PreprocessParams(
+        clahe_clip_limit=config.clahe_clip_limit,
+        clahe_tile_grid_size=config.clahe_tile_grid_size,
+        clahe_tile_px=config.clahe_tile_px,
+        morph_kernel_px=config.morph_kernel_px,
+        stretch_low_pct=config.stretch_low_pct,
+        stretch_high_pct=config.stretch_high_pct,
+        gamma=config.preprocess_gamma,
+        unsharp_sigma=config.unsharp_sigma,
+        unsharp_amount=config.unsharp_amount,
+    )
+
+
 def build_deidentifier(
     logger: PipelineEventLogger,
     config: PipelineConfig,
@@ -440,6 +524,8 @@ def build_deidentifier(
     params = DeidentifierParams(
         merge_distance_px=config.merge_distance_px,
         max_box_area_px=config.max_box_area_px,
+        max_box_area_ratio=config.max_box_area_ratio,
+        ellipse_enabled=config.ellipse_enabled,
         center_ellipse_axes_ratio=(
             config.ellipse_axis_x_ratio,
             config.ellipse_axis_y_ratio,
@@ -449,28 +535,42 @@ def build_deidentifier(
         min_confidence=config.ocr_min_confidence,
         redaction_mode=config.redaction_mode,
     )
-    strategy = None
+    strategy: ResolutionStrategy = FullImageStrategy()
     if config.resolution_strategy == "tiled":
         strategy = TiledStrategy(
             tile_size_px=config.tile_size_px,
             tile_overlap_px=config.tile_overlap_px,
             dedupe_containment=config.tile_dedupe_iou,
         )
+    if config.ocr_upscale_factor > 1.0:
+        # Wraps whatever strategy we just built, so upscale composes with
+        # tiling and the enlarged array never escapes into the Deidentifier.
+        strategy = UpscaleStrategy(
+            strategy,
+            factor=config.ocr_upscale_factor,
+            interpolation=config.ocr_upscale_interpolation,
+        )
     classifier = build_classifier(config.text_filter, config.short_text_max_chars)
+
+    preprocess_params = build_preprocess_params(config)
     preprocess = None
     if config.preprocess_steps:
         preprocess = partial(
-            apply_chain,
-            steps=list(config.preprocess_steps),
-            clahe_clip_limit=config.clahe_clip_limit,
-            clahe_tile_grid_size=config.clahe_tile_grid_size,
+            apply_chain, steps=list(config.preprocess_steps), params=preprocess_params
         )
+    preprocess_variants = None
+    if config.preprocess_variants:
+        preprocess_variants = [
+            partial(apply_chain, steps=list(steps), params=preprocess_params)
+            for steps in config.preprocess_variants
+        ]
     return Deidentifier(
         engine=engine,
         params=params,
         strategy=strategy,
         classifier=classifier,
         preprocess=preprocess,
+        preprocess_variants=preprocess_variants,
         dual_pass_invert=config.ocr_dual_pass_invert,
     )
 

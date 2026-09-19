@@ -217,4 +217,15 @@ __marimo__/
 
 # personal stuff
 imgs
-thesis
+artifacts/
+
+# Thesis working tree stays private, but benchmark summaries must be committable:
+# they are the only record of how each OCR configuration scored. Git cannot
+# re-include a path under an excluded *directory*, hence "thesis/*" (children
+# only) rather than "thesis".
+thesis/*
+!thesis/thesis_data_out/
+thesis/thesis_data_out/**/*.png
+thesis/thesis_data_out/**/*.jpg
+thesis/thesis_data_out/**/deidentification/images/
+thesis/thesis_data_out/**/overlays/

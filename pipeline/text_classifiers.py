@@ -33,6 +33,13 @@ class ShortTextSkipClassifier:
         self._max_skip_chars = max_skip_chars
 
     def should_redact(self, detection: OcrDetection) -> bool:
+        if not detection.text.strip():
+            # Detection-only engines (Surya, OnnxTR, RapidOCR with recognition
+            # off) report text="". Without this carve-out every one of their
+            # boxes would be skipped, which the benchmark would report as a
+            # precision win rather than as total recall failure. Recall first:
+            # redact content we cannot read.
+            return True
         normalized = _NON_ALNUM_RE.sub("", detection.text)
         return len(normalized) > self._max_skip_chars
 

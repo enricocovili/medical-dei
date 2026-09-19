@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+import cv2
 import numpy as np
 
 try:
@@ -136,4 +137,69 @@ class TiledStrategy:
         return [
             OcrDetection(quad=_rect_to_quad(rect), text=text, confidence=conf)
             for rect, text, conf in items
+        ]
+
+
+UPSCALE_INTERPOLATIONS = {
+    "cubic": cv2.INTER_CUBIC,
+    "lanczos": cv2.INTER_LANCZOS4,
+    "linear": cv2.INTER_LINEAR,
+    "nearest": cv2.INTER_NEAREST,
+}
+
+
+class UpscaleStrategy:
+    """Wraps another strategy: enlarges the OCR input, then maps every detection
+    coordinate back into the original array's space.
+
+    Upscaling belongs here rather than in ocr_preprocess.apply_chain because the
+    strategy layer already owns coordinate translation (see TiledStrategy). The
+    Deidentifier therefore never sees the enlarged array, so the centre-ellipse
+    test, max_box_area_px and the drawing clamp all keep working in original
+    pixels. As a preprocess step it would instead make the area cap 4x too
+    permissive at 2x and clamp enlarged coordinates into the original frame,
+    collapsing every box into the top-left quadrant.
+
+    Composes with tiling: UpscaleStrategy(TiledStrategy(1600, 200), 2.0) gives
+    1600px tiles over a 2x image, i.e. 800 native pixels at double detail.
+    """
+
+    def __init__(
+        self,
+        inner: ResolutionStrategy,
+        factor: float,
+        interpolation: str = "cubic",
+    ) -> None:
+        if factor < 1.0:
+            raise ValueError("upscale factor must be >= 1.0")
+        if interpolation not in UPSCALE_INTERPOLATIONS:
+            raise ValueError(
+                f"Invalid upscale interpolation '{interpolation}'. "
+                f"Valid values: {sorted(UPSCALE_INTERPOLATIONS)}"
+            )
+        self._inner = inner
+        self._factor = float(factor)
+        self._interpolation = UPSCALE_INTERPOLATIONS[interpolation]
+
+    def detect(self, engine: OcrEngine, image: np.ndarray) -> list[OcrDetection]:
+        if self._factor == 1.0:
+            return self._inner.detect(engine, image)
+        enlarged = cv2.resize(
+            image,
+            None,
+            fx=self._factor,
+            fy=self._factor,
+            interpolation=self._interpolation,
+        )
+        inverse = 1.0 / self._factor
+        return [
+            OcrDetection(
+                quad=[
+                    [int(round(point[0] * inverse)), int(round(point[1] * inverse))]
+                    for point in det.quad
+                ],
+                text=det.text,
+                confidence=det.confidence,
+            )
+            for det in self._inner.detect(engine, enlarged)
         ]

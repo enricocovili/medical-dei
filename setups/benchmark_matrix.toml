@@ -1,55 +1,156 @@
 # Sweep specification for test/benchmark_deid.py.
 #
-# [base] points at FROZEN upstream artifacts: ground-truth boxes are annotated
-# in crop coordinates, so crops_dir/postprocess_records must be the exact
-# postprocess outputs the ground truth was drawn on (do not re-run sam3 or
-# postprocess between benchmark runs).
+# Ground truth is annotated directly on the images each [[dataset]] points at
+# (verified: every GT coordinate falls inside its corresponding file). The sweep
+# therefore needs neither a GPU nor a SAM3/postprocess rerun — the postprocess
+# records are synthesised from a directory listing.
+#
+# Do NOT regenerate crops with test/run_postprocess_detached.py and point this
+# at them: that stage rotates and crops, which invalidates the annotations.
 #
 # Each [[variant]] holds config overrides applied on top of
 # setups/pipeline_config.toml [pipeline]; a variant with only a name runs the
 # current defaults (baseline).
 
 [base]
-crops_dir = "imgs/output/postprocess/crops"
-postprocess_records = "imgs/output/postprocess/records.json"
-ground_truth = "imgs/sam3_processed_panoramic/test_dataset_text_groundtruth.json"
 margin_px = 5.0
-out_root = "thesis/thesis_data_out/ocr_benchmarks/panoramic"
+iou_threshold = 0.5
+min_gt_side_px = 1.0 # drops one 27.0 x 0.029 px teleradiography annotation slip
+out_root = "thesis/thesis_data_out/ocr_benchmarks"
 
+[[dataset]]
+name = "panoramic"
+images_dir = "imgs/sam3_processed_panoramic/imgs"
+ground_truth = "imgs/sam3_processed_panoramic/test_dataset_text_groundtruth.json"
+
+[[dataset]]
+name = "teleradiography"
+images_dir = "imgs/teleradiography_with_text"
+ground_truth = "imgs/teleradiography_with_text/groundtruth.json"
+# 33 of the 99 images have no GT entry. images_dir makes them count as clean
+# (so they contribute to clean_image_fp_rate) rather than vanishing entirely;
+# if any of them actually do contain unannotated text, that rate is pessimistic.
+
+# ── The number everything else is measured against ──────────────────────────
 [[variant]]
 name = "baseline_easyocr"
 
+# ── Recall ceilings imposed by the geometric filters ────────────────────────
+# Measured against the ground truth: the central ellipse alone discards 8/81
+# panoramic and 16/136 teleradiography GT boxes, and max_box_area_px discards a
+# further 13/136 teleradiography boxes — before OCR is even involved.
 [[variant]]
-name = "easyocr_clahe"
+name = "no_ellipse"
+ellipse_enabled = false
+
+[[variant]]
+name = "ellipse_035_025"
+ellipse_axis_x_ratio = 0.35
+ellipse_axis_y_ratio = 0.25
+
+[[variant]]
+name = "no_area_cap"
+max_box_area_px = 0
+
+[[variant]]
+name = "no_ellipse_no_area_cap"
+ellipse_enabled = false
+max_box_area_px = 0
+
+[[variant]]
+name = "area_ratio_025"
+max_box_area_px = 0
+max_box_area_ratio = 0.25
+
+# ── Redaction padding: recall insurance vs over-redaction cost ──────────────
+[[variant]]
+name = "pad20"
+deid_padding_px = 20
+
+[[variant]]
+name = "pad30"
+deid_padding_px = 30
+
+# ── Preprocessing, aimed at the low-contrast failure mode ───────────────────
+[[variant]]
+name = "clahe"
 preprocess_steps = ["grayscale", "clahe"]
 
 [[variant]]
-name = "easyocr_conf02"
-ocr_min_confidence = 0.2
+name = "clahe_fixed_grid"
+preprocess_steps = ["grayscale", "clahe"]
+clahe_tile_px = 0 # the old fixed 8x8 grid, for comparison
 
 [[variant]]
-name = "easyocr_short_text"
-text_filter = "short_text"
+name = "clahe_clip4"
+preprocess_steps = ["grayscale", "clahe"]
+clahe_clip_limit = 4.0
 
 [[variant]]
-name = "easyocr_native_canvas"
-easyocr_canvas_size = 5000
+name = "tophat"
+preprocess_steps = ["grayscale", "tophat", "percentile_stretch"]
 
 [[variant]]
-name = "easyocr_tiled"
+name = "stretch"
+preprocess_steps = ["grayscale", "percentile_stretch"]
+
+[[variant]]
+name = "gamma"
+preprocess_steps = ["grayscale", "gamma"]
+
+[[variant]]
+name = "unsharp"
+preprocess_steps = ["grayscale", "unsharp"]
+
+[[variant]]
+name = "dual_pass_invert"
+ocr_dual_pass_invert = true
+
+# Preprocessing ensemble: one model, several chains, detections unioned.
+[[variant]]
+name = "preprocess_ensemble"
+preprocess_variants = [
+    [],
+    ["grayscale", "clahe"],
+    ["grayscale", "tophat", "percentile_stretch"],
+]
+
+# ── Resolution ──────────────────────────────────────────────────────────────
+[[variant]]
+name = "tiled"
 resolution_strategy = "tiled"
 
 [[variant]]
-name = "easyocr_clahe_conf02_short"
-preprocess_steps = ["grayscale", "clahe"]
+name = "upscale2x"
+ocr_upscale_factor = 2.0
+easyocr_canvas_size = 8000 # else EasyOCR downscales the upscale straight back
+
+# ── Detection thresholds / filters ──────────────────────────────────────────
+[[variant]]
+name = "easyocr_low_thresholds"
+easyocr_text_threshold = 0.3
+easyocr_low_text = 0.25
+easyocr_link_threshold = 0.25
+
+[[variant]]
+name = "conf02"
 ocr_min_confidence = 0.2
-text_filter = "short_text"
 
 [[variant]]
-name = "paddle_mobile"
-ocr_engine = "paddleocr"
-
-[[variant]]
-name = "paddle_mobile_short_text"
-ocr_engine = "paddleocr"
+name = "short_text"
 text_filter = "short_text"
+
+# ── Candidate shipping configuration ────────────────────────────────────────
+[[variant]]
+name = "recall_max"
+ellipse_axis_x_ratio = 0.35
+ellipse_axis_y_ratio = 0.25
+max_box_area_px = 0
+max_box_area_ratio = 0.25
+deid_padding_px = 20
+ocr_dual_pass_invert = true
+preprocess_variants = [
+    [],
+    ["grayscale", "clahe"],
+    ["grayscale", "tophat", "percentile_stretch"],
+]
