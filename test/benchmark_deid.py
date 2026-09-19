@@ -513,7 +513,22 @@ def main() -> int:
             postprocess_records_json = _resolve(str(dataset["postprocess_records"]))
             postprocess_records = None
 
+        # image_sizes defines the image universe the metrics are computed over
+        # (it is what makes a text-free image count as clean rather than vanish
+        # from the denominators). Under --limit only a subset is processed, so
+        # the universe must shrink with it or the clean-image FP rate is
+        # diluted by images no variant ever saw.
         image_sizes = build_image_size_index(crops_dir)
+        if postprocess_records is not None and args.limit:
+            processed = {Path(record["name"]).stem for record in postprocess_records}
+            image_sizes = {
+                stem: size for stem, size in image_sizes.items() if stem in processed
+            }
+            ground_truth = {
+                image: boxes
+                for image, boxes in ground_truth.items()
+                if image in processed
+            }
         artifacts_root = out_root / dataset_name
 
         print(f"\n########## Dataset: {dataset_name} ##########")
