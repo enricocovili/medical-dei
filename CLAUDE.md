@@ -209,3 +209,36 @@ metrics to the 66 annotated images; the consequence is that teleradiography
 cannot measure the clean-image false-positive rate at all, because every
 annotated image contains text. Annotating those 33 would both restore that
 measurement and raise the true PHI count the pipeline is scored against.
+
+
+## Measured results
+
+Full tables in `thesis/thesis_data_out/ocr_benchmarks/`; regenerate the metrics
+from saved predictions with `python test/rescore_benchmark.py`.
+
+| | panoramic (73 boxes) | teleradiography (133 boxes) |
+|---|---|---|
+| EasyOCR baseline, coverage recall | 0.740 | 0.887 |
+| **shipped config**, coverage recall | **0.795** | **0.947** |
+| EasyOCR baseline, case-level recall | 0.480 | 0.561 |
+| **shipped config**, case-level recall | **0.560** | **0.697** |
+
+The shipped config is `ocr_engine = "onnxtr"` with gentle CLAHE, 20px padding,
+a 0.35/0.25 ellipse and a relative area cap. Three results are worth knowing
+before changing it:
+
+1. **The ensemble adds nothing.** Every engine's detections are a nested subset
+   of the others', so the union of all variants finds exactly what the best
+   single one finds, and EasyOCR, RapidOCR and OnnxTR fail on the same boxes.
+   The single engine matches a three-engine ensemble on both recall figures
+   with 28% fewer predictions and a 42% lower clean-image false-positive rate.
+   `test/analyze_engine_overlap.py` is what shows this.
+2. **Stronger CLAHE is worse, despite looking better on hard cases.** Clip 40 /
+   16px beats the gentle default on the four images every engine fails (0.429
+   -> 0.667) and loses on the full set, doubling the detections for no net
+   recall and fragmenting text lines. Those four images are a biased sample —
+   they were selected *because* engines fail on them.
+3. **Post-filter tuning is exhausted.** All 17 remaining panoramic misses are
+   detection failures; none are boxes that were detected and then filtered
+   away. Further gains have to come from the detector, which is what the VLM
+   path (`ocr_engines_vlm.py`, the `vllm-*` compose services) is for.

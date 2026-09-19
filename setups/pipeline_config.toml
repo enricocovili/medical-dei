@@ -15,7 +15,15 @@ large_bb_area_ratio = 0.1
 
 # ── OCR engine ───────────────────────────────────────────────────────────────
 # easyocr | paddleocr | rapidocr | onnxtr | surya | vlm | ensemble
-ocr_engine = "easyocr"
+#
+# onnxtr won on both modalities (see thesis/thesis_data_out/ocr_benchmarks).
+# Paired with the settings below it reaches 0.795 coverage recall on panoramic
+# and 0.947 on teleradiography, against 0.740 and 0.887 for the previous
+# easyocr default. It also matches a three-engine ensemble exactly while making
+# 28% fewer predictions and roughly halving the false-positive rate -- the
+# ensemble turned out to add nothing here, because every engine's detections
+# are a nested subset of the others'.
+ocr_engine = "onnxtr"
 easyocr_langs = ["en", "it"]
 easyocr_gpu = false
 save_deidentified_dir = ""
@@ -94,7 +102,11 @@ ensemble_fail_mode = "warn"   # warn (skip a failing member) | raise
 # "percentile_stretch", "gamma", "unsharp"]. Every step must preserve the image
 # dimensions -- scaling lives in ocr_upscale_factor below, because the box
 # coordinates and the ellipse test are measured in this image's space.
-preprocess_steps = []
+# Gentle CLAHE, deliberately: clip 20/32px and clip 40/16px both score better
+# on the handful of hardest images and worse overall, roughly doubling the
+# detections and fragmenting text lines into pieces that each cover only part
+# of a box (teleradiography full-coverage drops 0.714 -> 0.564).
+preprocess_steps = ["grayscale", "clahe"]
 
 # Several independent chains; the engine runs once per chain and the detections
 # are unioned. One model, N passes -- the cheapest recall lever available.
@@ -145,8 +157,8 @@ merge_distance_px = 10
 # Reject "the engine returned the whole image". Measured against the ground
 # truth, the absolute cap alone discards 13 of 136 real teleradiography text
 # regions, so prefer the relative one (fraction of image area; 0 = disabled).
-max_box_area_px = 120000
-max_box_area_ratio = 0.0
+max_box_area_px = 0       # disabled in favour of the relative cap below
+max_box_area_ratio = 0.25
 
 # Central keep-out zone: detections overlapping it are dropped, to stop the OCR
 # hallucinating on tooth shapes. The half-axes are fractions of the FULL width
@@ -155,7 +167,7 @@ max_box_area_ratio = 0.0
 # 16 of 136 teleradiography GT text boxes are discarded before OCR can find
 # them. See the ellipse ablation in setups/benchmark_matrix.toml.
 ellipse_enabled = true
-ellipse_axis_x_ratio = 0.45
-ellipse_axis_y_ratio = 0.35
+ellipse_axis_x_ratio = 0.35
+ellipse_axis_y_ratio = 0.25
 ellipse_proximity_px = 0.0
-deid_padding_px = 10
+deid_padding_px = 20 # recall insurance; costs ~0.5pt of image area vs 10px
