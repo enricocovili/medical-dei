@@ -219,13 +219,10 @@ __marimo__/
 imgs
 artifacts/
 
-# Thesis working tree stays private, but benchmark summaries must be committable:
-# they are the only record of how each OCR configuration scored. Git cannot
-# re-include a path under an excluded *directory*, hence "thesis/*" (children
-# only) rather than "thesis".
-thesis/*
-!thesis/thesis_data_out/
-thesis/thesis_data_out/**/*.png
-thesis/thesis_data_out/**/*.jpg
-thesis/thesis_data_out/**/deidentification/images/
-thesis/thesis_data_out/**/overlays/
+# The whole thesis tree stays out of git. Benchmark predictions
+# (thesis/thesis_data_out/**/records.json) store the OCR'd text, and on this
+# dataset that text IS the burned-in PHI -- patient surnames and dates. The
+# de-identification output would otherwise become a plaintext index of exactly
+# the identifiers the pipeline exists to remove. Results live on disk only;
+# regenerate the tables with test/rescore_benchmark.py.
+thesis
