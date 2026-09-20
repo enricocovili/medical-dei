@@ -1,5 +1,12 @@
 # Sweep specification for test/benchmark_deid.py.
 #
+# IMPORTANT: every variant must pin `ocr_engine` explicitly, even when it
+# matches the current default in setups/pipeline_config.toml. Variants inherit
+# unset keys from that file, so when the default engine changed from easyocr to
+# onnxtr, variants named `easyocr_*` silently started measuring onnxtr and
+# reported identical numbers to the onnxtr variants. benchmark_deid now records
+# the resolved engine per row and refuses a variant whose name contradicts it.
+#
 # Ground truth is annotated directly on the images each [[dataset]] points at
 # (verified: every GT coordinate falls inside its corresponding file). The sweep
 # therefore needs neither a GPU nor a SAM3/postprocess rerun — the postprocess
@@ -38,6 +45,13 @@ annotated_only = true
 # ── The number everything else is measured against ──────────────────────────
 [[variant]]
 name = "baseline_easyocr"
+ocr_engine = "easyocr"
+preprocess_steps = []  # the pre-2026 shipped defaults, for comparison
+deid_padding_px = 10
+ellipse_axis_x_ratio = 0.45
+ellipse_axis_y_ratio = 0.35
+max_box_area_px = 120000
+max_box_area_ratio = 0.0
 
 # ── Recall ceilings imposed by the geometric filters ────────────────────────
 # Measured against the ground truth: the central ellipse alone discards 8/81
@@ -112,7 +126,7 @@ ocr_dual_pass_invert = true
 
 # Preprocessing ensemble: one model, several chains, detections unioned.
 [[variant]]
-name = "preprocess_ensemble"
+name = "preprocess_union"
 preprocess_variants = [
     [],
     ["grayscale", "clahe"],
@@ -132,6 +146,7 @@ easyocr_canvas_size = 8000 # else EasyOCR downscales the upscale straight back
 # ── Detection thresholds / filters ──────────────────────────────────────────
 [[variant]]
 name = "easyocr_low_thresholds"
+ocr_engine = "easyocr"
 easyocr_text_threshold = 0.3
 easyocr_low_text = 0.25
 easyocr_link_threshold = 0.25
@@ -196,7 +211,7 @@ ocr_engine = "onnxtr"
 ocr_upscale_factor = 2.0
 
 [[variant]]
-name = "onnxtr_preprocess_ensemble"
+name = "onnxtr_preprocess_union"
 ocr_engine = "onnxtr"
 preprocess_variants = [
     [],
@@ -242,6 +257,7 @@ clahe_tile_px = 32
 
 [[variant]]
 name = "easyocr_clahe_strong"
+ocr_engine = "easyocr"
 preprocess_steps = ["grayscale", "clahe"]
 clahe_clip_limit = 40.0
 clahe_tile_px = 16
@@ -253,9 +269,11 @@ preprocess_steps = ["grayscale", "clahe"]
 clahe_clip_limit = 40.0
 clahe_tile_px = 16
 
-# Union of the raw image and two contrast-enhanced views of it.
+# Union of the raw image and contrast-enhanced views of it. Named *_union,
+# not *_ensemble: 'ensemble' is the multi-engine ocr_engine value, and
+# reusing the word for a preprocessing union made variant names ambiguous.
 [[variant]]
-name = "onnxtr_clahe_ensemble"
+name = "onnxtr_clahe_union"
 ocr_engine = "onnxtr"
 preprocess_variants = [
     [],
@@ -294,6 +312,7 @@ max_box_area_ratio = 0.25
 
 [[variant]]
 name = "easyocr_recall_max"
+ocr_engine = "easyocr"
 deid_padding_px = 20
 ellipse_axis_x_ratio = 0.35
 ellipse_axis_y_ratio = 0.25

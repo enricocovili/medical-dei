@@ -50,6 +50,8 @@ from test_accuracy import (  # noqa: E402
     parse_predictions,
 )
 
+OCR_ENGINE_ALIASES = frozenset(pipeline_app.OCR_ENGINE_NAMES)
+
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
 # The reference central ellipse, so `central_fp` stays comparable across
@@ -321,6 +323,7 @@ def _write_dataset_summary(
         "dataset",
         "variant",
         "status",
+        "engine",
         *SUMMARY_METRIC_KEYS,
         "mean_time_s",
         "wall_time_s",
@@ -371,10 +374,25 @@ def run_variant(
         deid_records_json=variant_dir / "deidentification" / "records.json",
     )
 
+    # A variant inherits every key it does not override from
+    # setups/pipeline_config.toml, so its name can silently stop matching the
+    # engine it actually runs when that file's default changes. Record the
+    # resolved engine, and refuse a name that contradicts it.
+    for engine_name in sorted(OCR_ENGINE_ALIASES):
+        if name.startswith(engine_name + "_") or name.endswith("_" + engine_name):
+            if config.ocr_engine != engine_name:
+                raise ValueError(
+                    f"Variant '{name}' resolves to ocr_engine="
+                    f"'{config.ocr_engine}', not '{engine_name}'. Pin "
+                    f"ocr_engine in the variant, or rename it."
+                )
+            break
+
     row: Dict[str, Any] = {
         "dataset": str(dataset.get("name", "default")),
         "name": name,
         "variant": name,
+        "engine": config.ocr_engine,
         "overrides": overrides,
     }
     start = time.perf_counter()
@@ -635,6 +653,7 @@ def main() -> int:
         "dataset",
         "variant",
         "status",
+        "engine",
         *SUMMARY_METRIC_KEYS,
         "mean_time_s",
         "wall_time_s",
