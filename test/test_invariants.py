@@ -225,6 +225,94 @@ def test_degenerate_gt_filter() -> None:
     check(len(kept["a"]) == 1 and len(dropped) == 1, "sub-pixel GT box is filtered out")
 
 
+def test_vlm_grounding_parser() -> None:
+    """DeepSeek-style grounding: <|ref|>label<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>
+    with coordinates normalised to 0-999. Getting the scale wrong puts every
+    redaction in the wrong place, which for this pipeline means leaked PHI."""
+    from ocr_engines_vlm import parse_grounding_detections, parse_json_detections
+
+    content = "<|ref|>text<|/ref|><|det|>[[100, 50, 400, 150]]<|/det|>"
+    dets = parse_grounding_detections(content, 2000, 1000, "normalized_999")
+    check(len(dets) == 1, "grounding tags are parsed")
+    xs = [pt[0] for pt in dets[0].quad]
+    ys = [pt[1] for pt in dets[0].quad]
+    check(
+        abs(min(xs) - round(100 / 999 * 2000)) <= 1
+        and abs(max(xs) - round(400 / 999 * 2000)) <= 1,
+        "0-999 coordinates are scaled to image width",
+    )
+    check(
+        abs(min(ys) - round(50 / 999 * 1000)) <= 1
+        and abs(max(ys) - round(150 / 999 * 1000)) <= 1,
+        "0-999 coordinates are scaled to image height",
+    )
+    check(dets[0].text == "text", "the ref label is kept as the text")
+
+    # Same numbers read as pixels must NOT be rescaled.
+    pixel = parse_grounding_detections(content, 2000, 1000, "pixel")
+    check(
+        min(pt[0] for pt in pixel[0].quad) == 100
+        and max(pt[0] for pt in pixel[0].quad) == 400,
+        "pixel coordinate space passes numbers through unchanged",
+    )
+
+    multi = parse_grounding_detections(
+        "<|ref|>a<|/ref|><|det|>[[0,0,10,10],[20,20,30,30]]<|/det|>", 999, 999, "normalized_999"
+    )
+    check(len(multi) == 2, "several boxes in one det block are all parsed")
+
+    check(parse_grounding_detections("no tags here", 100, 100, "pixel") == [],
+          "a reply with no grounding tags yields no detections")
+    check(parse_grounding_detections(
+        "<|ref|>a<|/ref|><|det|>[[not json]]<|/det|>", 100, 100, "pixel") == [],
+        "malformed coordinates are skipped, not raised")
+
+    payload = '```json\n{"detections": [{"text": "Rossi", "bbox": [10, 20, 30, 40]}]}\n```'
+    js = parse_json_detections(payload, 100, 100, "pixel")
+    check(len(js) == 1 and js[0].text == "Rossi", "fenced JSON replies are parsed")
+    check(
+        min(pt[0] for pt in js[0].quad) == 10
+        and max(pt[0] for pt in js[0].quad) == 40,
+        "JSON bbox is [x, y, w, h], so x2 = x + w",
+    )
+    check(parse_json_detections("garbage", 100, 100, "pixel") == [],
+          "an unparseable JSON reply yields no detections")
+
+
+def test_vlm_engine_maps_back_and_dilates() -> None:
+    """The engine must return boxes in the space of the array it was handed,
+    even after downscaling for the API, and must apply its own dilation on top
+    of the global padding to absorb grounding drift."""
+    from ocr_engines_vlm import VlmEngine, VlmParams
+
+    class _Resp:
+        def __init__(self, text):
+            self.choices = [type("C", (), {"message": type("M", (), {"content": text})()})()]
+
+    class _Client:
+        def __init__(self, text):
+            self.sent = {}
+            outer = self
+
+            class _Completions:
+                def create(self, **kwargs):
+                    outer.sent = kwargs
+                    return _Resp(text)
+
+            self.chat = type("Chat", (), {"completions": _Completions()})()
+
+    # 4000px wide image, capped to 1000px for the request -> scale 0.25.
+    client = _Client('{"detections": [{"text": "X", "bbox": [100, 50, 100, 50]}]}')
+    engine = VlmEngine(client, VlmParams(max_side_px=1000, box_dilate_px=5, coord_space="pixel"))
+    image = np.zeros((2000, 4000, 3), dtype=np.uint8)
+    dets = engine.detect(image)
+    xs = [pt[0] for pt in dets[0].quad]
+    # 100px in the 1000px-wide request -> 400px in the original, minus dilation.
+    check(min(xs) == 400 - 5, "boxes are mapped back through the API downscale")
+    check(max(xs) == 800 + 5, "dilation widens the box on both sides")
+    check(client.sent.get("temperature") == 0, "requests are deterministic")
+
+
 def test_blank_gt_filter(tmp_dir: Path = Path("/tmp")) -> None:
     """A GT box over uniform pixels is unfindable by any OCR, so scoring against
     it measures nothing. The test looks only at the image, never at a
