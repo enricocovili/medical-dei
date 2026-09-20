@@ -100,8 +100,6 @@ Each of those four extension points is pluggable and configured from the TOML;
 
 ### The geometric filters cap recall before OCR runs
 
-Measured against the ground truth, with the reference settings:
-
 Counted against *findable* ground truth (73 panoramic, 133 teleradiography —
 see the data-quality section for what was excluded and why):
 
