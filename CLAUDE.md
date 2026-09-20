@@ -205,8 +205,28 @@ reaching as low as 11.8 — the distributions overlap completely, so any
 threshold that removed the noise would also remove real PHI. For a
 de-identification benchmark that is the wrong direction to err.
 
-If `panoramic_patient_4835` is confirmed mis-annotated, re-annotate or remove
-those six shapes; the reported recall ceiling rises accordingly.
+**Misaligned boxes — confirmed by inspection, NOT filtered.** Rendering the
+failure set with `test/render_failure_sheet.py` shows two further defect
+classes among the panoramic misses:
+
+- boxes sitting on plain anatomy with no text anywhere near them
+  (`panoramic_patient_2039 #0`, `panoramic_patient_4856 #1`);
+- boxes offset from the glyphs they should mark — in
+  `panoramic_patient_2134 #4/#5` and `panoramic_patient_4736 #0/#1/#2` the
+  annotation sits to the left of the visible text while the pipeline's
+  prediction correctly surrounds it, so these score as 61-75% partial misses
+  through no fault of the detector.
+
+Counting these with the `4835` group, **at least 13 of the 25 remaining
+panoramic misses are annotation defects rather than detection failures**, so
+the true recall of the shipped configuration is meaningfully above the 0.795
+reported here. The reported figure is deliberately the pessimistic one: the
+ground truth is taken as given and only *provably* unmatchable boxes (uniform
+pixels) are filtered.
+
+Re-annotating the panoramic ground truth is the single highest-value change
+available to this benchmark. Start from
+`thesis/thesis_data_out/overlays/panoramic_*_misses_*.png`.
 
 **Teleradiography ground truth is incomplete.** 33 of the 99 images have no
 entry at all, and 19 of those 33 demonstrably do contain text — EasyOCR reads
