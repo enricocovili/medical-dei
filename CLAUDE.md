@@ -246,13 +246,29 @@ from saved predictions with `python test/rescore_benchmark.py`.
 | | panoramic (73 boxes) | teleradiography (133 boxes) |
 |---|---|---|
 | EasyOCR baseline, coverage recall | 0.740 | 0.887 |
-| **shipped config**, coverage recall | **0.795** | **0.947** |
+| **shipped config**, coverage recall | **0.795** | **0.940** |
 | EasyOCR baseline, case-level recall | 0.480 | 0.561 |
-| **shipped config**, case-level recall | **0.560** | **0.697** |
+| **shipped config**, case-level recall | **0.520** | **0.682** |
 
-The shipped config is `ocr_engine = "onnxtr"` with gentle CLAHE, 20px padding,
-a 0.35/0.25 ellipse and a relative area cap. Three results are worth knowing
-before changing it:
+The shipped config is `ocr_engine = "onnxtr"` with gentle CLAHE, 10px padding,
+a 0.35/0.25 ellipse and a relative area cap.
+
+### Padding is the one knob left on the table
+
+`deid_padding_px` was measured at both settings on the shipped engine
+(`onnxtr_clahe_recall_max` vs `..._pad10` in the matrix):
+
+| padding | pan. recall | pan. case-level | tel. recall | tel. case-level | redacted area (pan./tel.) |
+|---|---|---|---|---|---|
+| 20px | 0.795 | **0.560** | **0.947** | **0.697** | 1.51% / 6.82% |
+| **10px (shipped)** | 0.795 | 0.520 | 0.940 | 0.682 | 1.32% / 6.13% |
+
+10px was chosen deliberately to keep over-redaction down. It costs 4 points of
+panoramic case-level recall — the PHI-leak metric — for 0.19 points of image
+area, which is a poor trade on this data; 20px is the recall-first setting if
+that priority ever wins. Clean-image false positives are identical either way.
+
+Three further results are worth knowing before changing the config:
 
 1. **The ensemble adds nothing.** Every engine's detections are a nested subset
    of the others', so the union of all variants finds exactly what the best
