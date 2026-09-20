@@ -5,7 +5,12 @@
 # unset keys from that file, so when the default engine changed from easyocr to
 # onnxtr, variants named `easyocr_*` silently started measuring onnxtr and
 # reported identical numbers to the onnxtr variants. benchmark_deid now records
-# the resolved engine per row and refuses a variant whose name contradicts it.
+# the resolved engine per row and refuses a variant whose name contradicts it,
+# and test/test_invariants.py fails if any variant here leaves it unset.
+#
+# The filter-ablation variants are pinned to easyocr because that is the
+# engine their committed results were measured with; the ablation is about
+# the filters, not the engine.
 #
 # Ground truth is annotated directly on the images each [[dataset]] points at
 # (verified: every GT coordinate falls inside its corresponding file). The sweep
@@ -59,74 +64,90 @@ max_box_area_ratio = 0.0
 # further 13/136 teleradiography boxes — before OCR is even involved.
 [[variant]]
 name = "no_ellipse"
+ocr_engine = "easyocr"
 ellipse_enabled = false
 
 [[variant]]
 name = "ellipse_035_025"
+ocr_engine = "easyocr"
 ellipse_axis_x_ratio = 0.35
 ellipse_axis_y_ratio = 0.25
 
 [[variant]]
 name = "no_area_cap"
+ocr_engine = "easyocr"
 max_box_area_px = 0
 
 [[variant]]
 name = "no_ellipse_no_area_cap"
+ocr_engine = "easyocr"
 ellipse_enabled = false
 max_box_area_px = 0
 
 [[variant]]
 name = "area_ratio_025"
+ocr_engine = "easyocr"
 max_box_area_px = 0
 max_box_area_ratio = 0.25
 
 # ── Redaction padding: recall insurance vs over-redaction cost ──────────────
 [[variant]]
 name = "pad20"
+ocr_engine = "easyocr"
 deid_padding_px = 20
 
 [[variant]]
 name = "pad30"
+ocr_engine = "easyocr"
 deid_padding_px = 30
 
 # ── Preprocessing, aimed at the low-contrast failure mode ───────────────────
 [[variant]]
 name = "clahe"
+ocr_engine = "easyocr"
 preprocess_steps = ["grayscale", "clahe"]
 
 [[variant]]
 name = "clahe_fixed_grid"
+ocr_engine = "easyocr"
 preprocess_steps = ["grayscale", "clahe"]
 clahe_tile_px = 0 # the old fixed 8x8 grid, for comparison
 
 [[variant]]
 name = "clahe_clip4"
+ocr_engine = "easyocr"
 preprocess_steps = ["grayscale", "clahe"]
 clahe_clip_limit = 4.0
 
 [[variant]]
 name = "tophat"
+ocr_engine = "easyocr"
 preprocess_steps = ["grayscale", "tophat", "percentile_stretch"]
 
 [[variant]]
 name = "stretch"
+ocr_engine = "easyocr"
 preprocess_steps = ["grayscale", "percentile_stretch"]
 
 [[variant]]
 name = "gamma"
+ocr_engine = "easyocr"
 preprocess_steps = ["grayscale", "gamma"]
 
 [[variant]]
 name = "unsharp"
+ocr_engine = "easyocr"
 preprocess_steps = ["grayscale", "unsharp"]
 
 [[variant]]
 name = "dual_pass_invert"
+ocr_engine = "easyocr"
 ocr_dual_pass_invert = true
 
 # Preprocessing ensemble: one model, several chains, detections unioned.
 [[variant]]
 name = "preprocess_union"
+ocr_engine = "easyocr"
 preprocess_variants = [
     [],
     ["grayscale", "clahe"],
@@ -136,10 +157,12 @@ preprocess_variants = [
 # ── Resolution ──────────────────────────────────────────────────────────────
 [[variant]]
 name = "tiled"
+ocr_engine = "easyocr"
 resolution_strategy = "tiled"
 
 [[variant]]
 name = "upscale2x"
+ocr_engine = "easyocr"
 ocr_upscale_factor = 2.0
 easyocr_canvas_size = 8000 # else EasyOCR downscales the upscale straight back
 
@@ -153,15 +176,18 @@ easyocr_link_threshold = 0.25
 
 [[variant]]
 name = "conf02"
+ocr_engine = "easyocr"
 ocr_min_confidence = 0.2
 
 [[variant]]
 name = "short_text"
+ocr_engine = "easyocr"
 text_filter = "short_text"
 
 # ── Candidate shipping configuration ────────────────────────────────────────
 [[variant]]
 name = "recall_max"
+ocr_engine = "easyocr"
 ellipse_axis_x_ratio = 0.35
 ellipse_axis_y_ratio = 0.25
 max_box_area_px = 0

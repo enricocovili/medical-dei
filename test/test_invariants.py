@@ -225,6 +225,43 @@ def test_degenerate_gt_filter() -> None:
     check(len(kept["a"]) == 1 and len(dropped) == 1, "sub-pixel GT box is filtered out")
 
 
+def test_matrix_variants_pin_their_engine() -> None:
+    """Every benchmark variant must resolve to the engine its name claims.
+
+    Variants inherit unset keys from setups/pipeline_config.toml, so changing
+    the default engine there silently repointed variants named easyocr_* at
+    onnxtr — two arms of a comparison became the same run and reported
+    identical numbers. This is the regression test for that.
+    """
+    import tomllib
+
+    import app
+
+    base = app._load_pipeline_section()
+    matrix = tomllib.loads(
+        (REPO_ROOT / "setups/benchmark_matrix.toml").read_text(encoding="utf-8")
+    )
+    mismatched = []
+    for variant in matrix["variant"]:
+        name = variant["name"]
+        section = dict(base)
+        section.update({k: v for k, v in variant.items() if k != "name"})
+        config = app.build_config_from_dict(section)
+        for engine in sorted(app.OCR_ENGINE_NAMES):
+            if name.startswith(engine + "_") or name.endswith("_" + engine):
+                if config.ocr_engine != engine:
+                    mismatched.append((name, engine, config.ocr_engine))
+                break
+        # An engine-agnostic name must still pin an engine, or its meaning
+        # changes whenever the shipped default does.
+        if "ocr_engine" not in variant:
+            mismatched.append((name, "<pinned>", "inherited from the config"))
+    check(
+        not mismatched,
+        f"every matrix variant pins an engine matching its name ({mismatched[:3]})",
+    )
+
+
 def test_vlm_grounding_parser() -> None:
     """DeepSeek-style grounding: <|ref|>label<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>
     with coordinates normalised to 0-999. Getting the scale wrong puts every
