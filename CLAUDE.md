@@ -102,18 +102,27 @@ Each of those four extension points is pluggable and configured from the TOML;
 
 Measured against the ground truth, with the reference settings:
 
+Counted against *findable* ground truth (73 panoramic, 133 teleradiography —
+see the data-quality section for what was excluded and why):
+
 | Filter | Panoramic GT lost | Teleradiography GT lost |
 |---|---|---|
-| central ellipse `0.45 / 0.35` | 8 / 81 (9.9%) | 16 / 136 (11.8%) |
-| `max_box_area_px = 120000` | 0 / 81 | 13 / 136 (9.6%) |
+| central ellipse `0.45 / 0.35` | 8 / 73 (11.0%) | 16 / 133 (12.0%) |
+| `max_box_area_px = 120000` | 0 / 73 | 13 / 133 (9.8%) |
+| either | 8 / 73 | 25 / 133 |
 
 The ellipse half-axes are fractions of the **full** width and height, so
 `0.45/0.35` spans 5%–95% horizontally and 15%–85% vertically — nearly the whole
-image, not a central core. A perfect OCR model therefore cannot exceed 0.901
-box recall on panoramic or 0.816 on teleradiography until these change. Use
-`ellipse_enabled = false` to disable the zone outright, and prefer
-`max_box_area_ratio` over the absolute cap. `setups/benchmark_matrix.toml`
-contains the ablation.
+image, not a central core. With the reference settings a perfect OCR model
+could not exceed **0.890** box recall on panoramic or **0.812** on
+teleradiography. The shipped config uses `0.35/0.25` and `max_box_area_ratio`
+instead, which removes both ceilings.
+
+Note this ceiling was never the binding constraint for EasyOCR: relaxing the
+filters alone moved panoramic recall by only +1.2 points, because the engine
+was not finding those boxes in the first place. The ceiling matters for a
+*better* detector, which is exactly what the shipped config now is.
+`setups/benchmark_matrix.toml` contains the ablation.
 
 ### Alarm system
 
@@ -230,8 +239,10 @@ before changing it:
 1. **The ensemble adds nothing.** Every engine's detections are a nested subset
    of the others', so the union of all variants finds exactly what the best
    single one finds, and EasyOCR, RapidOCR and OnnxTR fail on the same boxes.
-   The single engine matches a three-engine ensemble on both recall figures
-   with 28% fewer predictions and a 42% lower clean-image false-positive rate.
+   On panoramic the single engine matches a three-engine ensemble on both
+   recall figures with 28% fewer predictions and a 42% lower clean-image
+   false-positive rate. The nested-subset property holds on both modalities;
+   the head-to-head against the ensemble was measured on panoramic.
    `test/analyze_engine_overlap.py` is what shows this.
 2. **Stronger CLAHE is worse, despite looking better on hard cases.** Clip 40 /
    16px beats the gentle default on the four images every engine fails (0.429
