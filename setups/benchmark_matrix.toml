@@ -344,3 +344,15 @@ ellipse_axis_x_ratio = 0.35
 ellipse_axis_y_ratio = 0.25
 max_box_area_px = 0
 max_box_area_ratio = 0.25
+
+# The shipped configuration at 10px padding instead of 20, to quantify what
+# that change costs in coverage and saves in over-redacted pixels.
+[[variant]]
+name = "onnxtr_clahe_recall_max_pad10"
+ocr_engine = "onnxtr"
+preprocess_steps = ["grayscale", "clahe"]
+deid_padding_px = 10
+ellipse_axis_x_ratio = 0.35
+ellipse_axis_y_ratio = 0.25
+max_box_area_px = 0
+max_box_area_ratio = 0.25

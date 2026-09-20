@@ -170,4 +170,4 @@ ellipse_enabled = true
 ellipse_axis_x_ratio = 0.35
 ellipse_axis_y_ratio = 0.25
 ellipse_proximity_px = 0.0
-deid_padding_px = 20 # recall insurance; costs ~0.5pt of image area vs 10px
+deid_padding_px = 10
