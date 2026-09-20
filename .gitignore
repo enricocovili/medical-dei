@@ -217,4 +217,12 @@ __marimo__/
 
 # personal stuff
 imgs
+artifacts/
+
+# The whole thesis tree stays out of git. Benchmark predictions
+# (thesis/thesis_data_out/**/records.json) store the OCR'd text, and on this
+# dataset that text IS the burned-in PHI -- patient surnames and dates. The
+# de-identification output would otherwise become a plaintext index of exactly
+# the identifiers the pipeline exists to remove. Results live on disk only;
+# regenerate the tables with test/rescore_benchmark.py.
 thesis

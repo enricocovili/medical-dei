@@ -76,6 +76,43 @@ RUN if [ "$INSTALL_PADDLE" = "1" ]; then \
         uv pip install "paddleocr>=3.0,<4" "paddlepaddle>=3.0" ; \
     fi
 
+# ── RapidOCR: the PP-OCRv6 DB detector over ONNX Runtime ────────────────────
+# Unlike paddlepaddle this DOES work on sm_120/Blackwell, because it never
+# touches paddle. Caveat: the official onnxruntime-gpu wheels carry no sm_120
+# kernels either, so on an RTX 5000 the CUDA provider is simply absent and
+# inference silently falls back to CPU — build_rapidocr_engine logs the
+# available providers so that shows up as a warning rather than as a
+# mysteriously slow model. On the 2080 Ti runner the GPU provider works.
+# Set ONNX_RUNTIME=onnxruntime to force the CPU build.
+ARG INSTALL_RAPIDOCR=1
+ARG ONNX_RUNTIME=onnxruntime-gpu
+RUN if [ "$INSTALL_RAPIDOCR" = "1" ]; then \
+        uv pip install "rapidocr>=3.0" "${ONNX_RUNTIME}>=1.22" ; \
+    fi
+
+# ── OnnxTR (DBNet/ResNet-50), sharing the onnxruntime installed above ───────
+ARG INSTALL_ONNXTR=1
+RUN if [ "$INSTALL_ONNXTR" = "1" ]; then uv pip install "onnxtr>=0.9" ; fi
+
+# ── Surya (optional, isolated) ──────────────────────────────────────────────
+# surya-ocr pins pillow<11 and opencv-python-headless==4.11.0.86 exactly, both
+# of which conflict with this image's core packages, so it gets its own venv
+# rather than corrupting the main one. pipeline/ocr_engines_det.py imports it
+# lazily, so the main environment is unaffected when this layer is skipped.
+ARG INSTALL_SURYA=0
+RUN if [ "$INSTALL_SURYA" = "1" ]; then \
+        uv venv /opt/venv-surya --python 3.12 \
+        && uv pip install --python /opt/venv-surya "surya-ocr>=0.19" ; \
+    fi
+
+# ── Guard against a silent torch downgrade ──────────────────────────────────
+# Installing OCR packages can pull a different torch; a pre-2.7 build has no
+# sm_120 kernels, which would disable the GPU without any error message. Fail
+# the build instead.
+RUN python -c "import torch, sys; cuda = torch.version.cuda or ''; \
+    print('torch', torch.__version__, 'cuda', cuda); \
+    sys.exit(0 if cuda.startswith('12.8') else 1)"
+
 # ── Application source ───────────────────────────────────────────────────────
 WORKDIR /app
 COPY pipeline/  ./pipeline/

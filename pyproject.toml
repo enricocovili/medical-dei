@@ -17,3 +17,48 @@ paddle = [
     "paddleocr>=3.0,<4",
     "paddlepaddle>=3.0",
 ]
+
+# The same PP-OCRv5/v6 DB detector over ONNX Runtime, without paddlepaddle —
+# which matters because paddlepaddle-gpu ships no sm_120 wheels, so on a
+# Blackwell card the paddle backend is stuck on CPU.
+# onnxruntime and onnxruntime-gpu collide on the same import name: install
+# exactly one. The official onnxruntime-gpu wheels also lack sm_120 kernels, so
+# on Blackwell the CUDA provider is simply absent and inference silently falls
+# back to CPU — build_rapidocr_engine logs the available providers for this
+# reason.
+rapidocr = [
+    "rapidocr>=3.0",
+    "onnxruntime>=1.22",
+]
+rapidocr-gpu = [
+    "rapidocr>=3.0",
+    "onnxruntime-gpu>=1.22",
+]
+
+# DBNet with a ResNet-50 backbone over ONNX Runtime — the ensemble's third
+# detector, sharing rapidocr's runtime but with a different backbone and
+# training set. Install alongside one of the rapidocr extras (they share
+# onnxruntime).
+onnxtr = [
+    "onnxtr>=0.9",
+]
+onnxtr-gpu = [
+    "onnxtr>=0.9",
+]
+
+# NOTE: Surya (pipeline/ocr_engines_det.py:SuryaDetEngine) is deliberately NOT
+# an extra here. surya-ocr pins pillow<11 and opencv-python-headless==4.11.0.86
+# exactly, both of which conflict with this project's core dependencies, so
+# adding it makes the whole lock unresolvable. The engine code is kept because
+# Surya is worth benchmarking on the GPU box, where it can live in its own
+# image or venv:
+#     uv venv .venv-surya && uv pip install --python .venv-surya surya-ocr
+
+# No "vlm" group: openai is already a core dependency, and every VLM path
+# (hosted API, local vLLM, SGLang) is reached through the OpenAI-compatible
+# client. See pipeline/ocr_engines_vlm.py for why that boundary is forced.
+
+[tool.uv]
+conflicts = [
+    [{ extra = "rapidocr" }, { extra = "rapidocr-gpu" }],
+]

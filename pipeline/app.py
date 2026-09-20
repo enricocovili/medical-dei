@@ -8,7 +8,7 @@ import tomllib
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -32,12 +32,22 @@ try:
     )
     from .ocr_engines import (
         EasyOcrParams,
+        EnsembleMember,
+        EnsembleOcrEngine,
         OcrEngine,
         build_easyocr_engine,
         build_paddle_engine,
     )
-    from .ocr_preprocess import apply_chain, validate_steps
-    from .ocr_strategies import RESOLUTION_STRATEGIES, TiledStrategy
+    from .ocr_engines_vlm import VLM_COORD_SPACES, VLM_RESPONSE_FORMATS
+    from .ocr_preprocess import PreprocessParams, apply_chain, validate_steps
+    from .ocr_strategies import (
+        RESOLUTION_STRATEGIES,
+        UPSCALE_INTERPOLATIONS,
+        FullImageStrategy,
+        ResolutionStrategy,
+        TiledStrategy,
+        UpscaleStrategy,
+    )
     from .report_writer import JsonReportWriter
     from .sam3_component import Sam3ImageSegmenter
     from .text_classifiers import TEXT_FILTERS, build_classifier
@@ -60,20 +70,41 @@ except ImportError:
     )
     from ocr_engines import (
         EasyOcrParams,
+        EnsembleMember,
+        EnsembleOcrEngine,
         OcrEngine,
         build_easyocr_engine,
         build_paddle_engine,
     )
-    from ocr_preprocess import apply_chain, validate_steps
-    from ocr_strategies import RESOLUTION_STRATEGIES, TiledStrategy
+    from ocr_engines_vlm import VLM_COORD_SPACES, VLM_RESPONSE_FORMATS
+    from ocr_preprocess import PreprocessParams, apply_chain, validate_steps
+    from ocr_strategies import (
+        RESOLUTION_STRATEGIES,
+        UPSCALE_INTERPOLATIONS,
+        FullImageStrategy,
+        ResolutionStrategy,
+        TiledStrategy,
+        UpscaleStrategy,
+    )
     from report_writer import JsonReportWriter
     from sam3_component import Sam3ImageSegmenter
     from text_classifiers import TEXT_FILTERS, build_classifier
 
 
+_logger = logging.getLogger(__name__)
+
 CONFIG_FILE = Path("setups/pipeline_config.toml")
 CONFIG_SECTION = "pipeline"
 RUN_MODES = {"full", "sam3", "postprocess", "deidentification", "report"}
+OCR_ENGINE_NAMES = {
+    "easyocr",
+    "paddleocr",
+    "rapidocr",
+    "surya",
+    "onnxtr",
+    "vlm",
+    "ensemble",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +124,8 @@ class PipelineConfig:
     save_deidentified_dir: Path | None
     merge_distance_px: int
     max_box_area_px: int | None
+    max_box_area_ratio: float | None
+    ellipse_enabled: bool
     ellipse_axis_x_ratio: float
     ellipse_axis_y_ratio: float
     ellipse_proximity_px: float
@@ -107,10 +140,47 @@ class PipelineConfig:
     paddleocr_device: str
     paddleocr_det_model: str
     paddleocr_rec_model: str
+    rapidocr_device: str
+    rapidocr_text_score: float
+    rapidocr_box_thresh: float
+    rapidocr_thresh: float
+    rapidocr_unclip_ratio: float
+    rapidocr_limit_side_len: int
+    rapidocr_use_rec: bool
+    surya_device: str
+    surya_min_confidence: float
+    onnxtr_arch: str
+    onnxtr_device: str
+    onnxtr_bin_thresh: float
+    onnxtr_box_thresh: float
+    onnxtr_unclip_ratio: float
+    vlm_model: str
+    vlm_base_url: str | None
+    vlm_api_key_env: str
+    vlm_prompt: str | None
+    vlm_response_format: str
+    vlm_coord_space: str | None
+    vlm_box_dilate_px: int
+    vlm_max_side_px: int
+    vlm_timeout_s: float
+    vlm_confidence: float
+    ensemble_engines: list[str]
+    ensemble_min_confidences: list[float]
+    ensemble_fail_mode: str
     preprocess_steps: list[str]
+    preprocess_variants: list[list[str]]
     clahe_clip_limit: float
     clahe_tile_grid_size: int
+    clahe_tile_px: int
+    morph_kernel_px: int
+    stretch_low_pct: float
+    stretch_high_pct: float
+    preprocess_gamma: float
+    unsharp_sigma: float
+    unsharp_amount: float
     ocr_dual_pass_invert: bool
+    ocr_upscale_factor: float
+    ocr_upscale_interpolation: str
     resolution_strategy: str
     tile_size_px: int
     tile_overlap_px: int
@@ -262,6 +332,20 @@ def _optional_str_list(config: dict[str, object], key: str) -> list[str]:
     return items
 
 
+def _optional_float_list(config: dict[str, object], key: str) -> list[float]:
+    value = config.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"Config key '{key}' must be a list of numbers when provided")
+    items: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise ValueError(f"All values in '{key}' must be numbers")
+        items.append(float(item))
+    return items
+
+
 def _optional_path(config: dict[str, object], key: str) -> Path | None:
     value = config.get(key)
     if value is None:
@@ -316,6 +400,57 @@ def build_config_from_dict(config: dict[str, object]) -> PipelineConfig:
     preprocess_steps = _optional_str_list(config, "preprocess_steps")
     validate_steps(preprocess_steps)
 
+    # A list of independent preprocessing chains; the engine runs once per chain
+    # and the detections are unioned. Empty means "just preprocess_steps".
+    variants_raw = config.get("preprocess_variants")
+    preprocess_variants: list[list[str]] = []
+    if variants_raw is not None:
+        if not isinstance(variants_raw, list):
+            raise ValueError(
+                "Config key 'preprocess_variants' must be a list of step lists"
+            )
+        for entry in variants_raw:
+            if not isinstance(entry, list):
+                raise ValueError(
+                    "Each entry of 'preprocess_variants' must be a list of step names"
+                )
+            steps = [str(step).strip().lower() for step in entry]
+            validate_steps(steps)
+            preprocess_variants.append(steps)
+
+    ensemble_engines = _optional_str_list(config, "ensemble_engines")
+    ensemble_min_confidences = _optional_float_list(config, "ensemble_min_confidences")
+    if ensemble_engines:
+        unknown = set(ensemble_engines) - (OCR_ENGINE_NAMES - {"ensemble"})
+        if unknown:
+            raise ValueError(f"Unknown ensemble_engines: {sorted(unknown)}")
+        if len(set(ensemble_engines)) != len(ensemble_engines):
+            raise ValueError("ensemble_engines must not repeat an engine")
+        if ensemble_min_confidences and len(ensemble_min_confidences) != len(
+            ensemble_engines
+        ):
+            raise ValueError(
+                "ensemble_min_confidences must have the same length as ensemble_engines"
+            )
+
+    vlm_coord_space = _optional_str(config, "vlm_coord_space")
+    if vlm_coord_space is not None and vlm_coord_space not in VLM_COORD_SPACES:
+        raise ValueError(
+            f"Config key 'vlm_coord_space' must be one of {sorted(VLM_COORD_SPACES)}"
+        )
+
+    area_ratio_raw = config.get("max_box_area_ratio")
+    if area_ratio_raw is None:
+        max_box_area_ratio = None
+    elif isinstance(area_ratio_raw, (int, float)) and not isinstance(
+        area_ratio_raw, bool
+    ):
+        max_box_area_ratio = None if area_ratio_raw <= 0 else float(area_ratio_raw)
+        if max_box_area_ratio is not None and max_box_area_ratio > 1.0:
+            raise ValueError("Config key 'max_box_area_ratio' must be <= 1.0")
+    else:
+        raise ValueError("Config key 'max_box_area_ratio' must be a number or null")
+
     return PipelineConfig(
         run_mode=run_mode,
         input_path=_resolve_path(_require_str(config, "input_path")),
@@ -332,12 +467,14 @@ def build_config_from_dict(config: dict[str, object]) -> PipelineConfig:
         save_deidentified_dir=_optional_path(config, "save_deidentified_dir"),
         merge_distance_px=_require_int(config, "merge_distance_px"),
         max_box_area_px=max_box_area_px,
+        max_box_area_ratio=max_box_area_ratio,
+        ellipse_enabled=_optional_bool(config, "ellipse_enabled", True),
         ellipse_axis_x_ratio=_require_float(config, "ellipse_axis_x_ratio"),
         ellipse_axis_y_ratio=_require_float(config, "ellipse_axis_y_ratio"),
         ellipse_proximity_px=_require_float(config, "ellipse_proximity_px"),
         deid_padding_px=_require_int(config, "deid_padding_px"),
         ocr_engine=_optional_choice(
-            config, "ocr_engine", "easyocr", {"easyocr", "paddleocr"}
+            config, "ocr_engine", "easyocr", OCR_ENGINE_NAMES
         ),
         ocr_min_confidence=_optional_float(config, "ocr_min_confidence", 0.0),
         easyocr_text_threshold=_optional_float(config, "easyocr_text_threshold", 0.5),
@@ -350,10 +487,53 @@ def build_config_from_dict(config: dict[str, object]) -> PipelineConfig:
         or "PP-OCRv5_mobile_det",
         paddleocr_rec_model=_optional_str(config, "paddleocr_rec_model")
         or "PP-OCRv5_mobile_rec",
+        rapidocr_device=_optional_choice(config, "rapidocr_device", "gpu", {"cpu", "gpu"}),
+        rapidocr_text_score=_optional_float(config, "rapidocr_text_score", 0.3),
+        rapidocr_box_thresh=_optional_float(config, "rapidocr_box_thresh", 0.3),
+        rapidocr_thresh=_optional_float(config, "rapidocr_thresh", 0.2),
+        rapidocr_unclip_ratio=_optional_float(config, "rapidocr_unclip_ratio", 2.0),
+        rapidocr_limit_side_len=_optional_int(config, "rapidocr_limit_side_len", 2560),
+        rapidocr_use_rec=_optional_bool(config, "rapidocr_use_rec", True),
+        surya_device=_optional_choice(config, "surya_device", "cuda", {"cpu", "cuda"}),
+        surya_min_confidence=_optional_float(config, "surya_min_confidence", 0.0),
+        onnxtr_arch=_optional_str(config, "onnxtr_arch") or "db_resnet50",
+        onnxtr_device=_optional_choice(config, "onnxtr_device", "gpu", {"cpu", "gpu"}),
+        onnxtr_bin_thresh=_optional_float(config, "onnxtr_bin_thresh", 0.2),
+        onnxtr_box_thresh=_optional_float(config, "onnxtr_box_thresh", 0.05),
+        onnxtr_unclip_ratio=_optional_float(config, "onnxtr_unclip_ratio", 2.0),
+        vlm_model=_optional_str(config, "vlm_model") or "gpt-5.4-mini",
+        vlm_base_url=_optional_str(config, "vlm_base_url"),
+        vlm_api_key_env=_optional_str(config, "vlm_api_key_env") or "OPENAI_API_KEY",
+        vlm_prompt=_optional_str(config, "vlm_prompt"),
+        vlm_response_format=_optional_choice(
+            config, "vlm_response_format", "json", VLM_RESPONSE_FORMATS
+        ),
+        vlm_coord_space=vlm_coord_space,
+        vlm_box_dilate_px=_optional_int(config, "vlm_box_dilate_px", 24),
+        vlm_max_side_px=_optional_int(config, "vlm_max_side_px", 2048),
+        vlm_timeout_s=_optional_float(config, "vlm_timeout_s", 120.0),
+        vlm_confidence=_optional_float(config, "vlm_confidence", 1.0),
+        ensemble_engines=ensemble_engines,
+        ensemble_min_confidences=ensemble_min_confidences,
+        ensemble_fail_mode=_optional_choice(
+            config, "ensemble_fail_mode", "warn", {"warn", "raise"}
+        ),
         preprocess_steps=preprocess_steps,
+        preprocess_variants=preprocess_variants,
         clahe_clip_limit=_optional_float(config, "clahe_clip_limit", 2.0),
         clahe_tile_grid_size=_optional_int(config, "clahe_tile_grid_size", 8),
+        clahe_tile_px=_optional_int(config, "clahe_tile_px", 128),
+        morph_kernel_px=_optional_int(config, "morph_kernel_px", 21),
+        stretch_low_pct=_optional_float(config, "stretch_low_pct", 1.0),
+        stretch_high_pct=_optional_float(config, "stretch_high_pct", 99.0),
+        preprocess_gamma=_optional_float(config, "preprocess_gamma", 0.5),
+        unsharp_sigma=_optional_float(config, "unsharp_sigma", 2.0),
+        unsharp_amount=_optional_float(config, "unsharp_amount", 1.5),
         ocr_dual_pass_invert=_optional_bool(config, "ocr_dual_pass_invert", False),
+        ocr_upscale_factor=_optional_float(config, "ocr_upscale_factor", 1.0),
+        ocr_upscale_interpolation=_optional_choice(
+            config, "ocr_upscale_interpolation", "cubic", set(UPSCALE_INTERPOLATIONS)
+        ),
         resolution_strategy=_optional_choice(
             config, "resolution_strategy", "full", RESOLUTION_STRATEGIES
         ),
@@ -363,7 +543,7 @@ def build_config_from_dict(config: dict[str, object]) -> PipelineConfig:
         text_filter=_optional_choice(config, "text_filter", "none", TEXT_FILTERS),
         short_text_max_chars=_optional_int(config, "short_text_max_chars", 2),
         redaction_mode=_optional_choice(
-            config, "redaction_mode", "outline", REDACTION_MODES
+            config, "redaction_mode", "fill", REDACTION_MODES
         ),
         record_raw_detections=_optional_bool(config, "record_raw_detections", False),
     )
@@ -403,31 +583,159 @@ def build_postprocessor(config: PipelineConfig) -> MaskPostprocessor:
     )
 
 
-def build_ocr_engine(logger: PipelineEventLogger, config: PipelineConfig) -> OcrEngine:
-    if config.ocr_engine == "easyocr":
-        logger.loading_model("EasyOCR")
-        engine: OcrEngine = build_easyocr_engine(
-            config.easyocr_langs,
-            config.easyocr_gpu,
-            EasyOcrParams(
-                text_threshold=config.easyocr_text_threshold,
-                low_text=config.easyocr_low_text,
-                link_threshold=config.easyocr_link_threshold,
-                canvas_size=config.easyocr_canvas_size,
-                mag_ratio=config.easyocr_mag_ratio,
-            ),
-        )
-        logger.model_loaded("EasyOCR")
-        return engine
+def _build_easyocr(config: PipelineConfig) -> OcrEngine:
+    return build_easyocr_engine(
+        config.easyocr_langs,
+        config.easyocr_gpu,
+        EasyOcrParams(
+            text_threshold=config.easyocr_text_threshold,
+            low_text=config.easyocr_low_text,
+            link_threshold=config.easyocr_link_threshold,
+            canvas_size=config.easyocr_canvas_size,
+            mag_ratio=config.easyocr_mag_ratio,
+        ),
+    )
 
-    logger.loading_model("PaddleOCR")
-    engine = build_paddle_engine(
+
+def _build_paddleocr(config: PipelineConfig) -> OcrEngine:
+    return build_paddle_engine(
         device=config.paddleocr_device,
         det_model=config.paddleocr_det_model,
         rec_model=config.paddleocr_rec_model,
     )
-    logger.model_loaded("PaddleOCR")
+
+
+def _build_rapidocr(config: PipelineConfig) -> OcrEngine:
+    # Imported lazily so a bare install without onnxruntime can still import app.
+    try:
+        from .ocr_engines_det import RapidOcrParams, build_rapidocr_engine
+    except ImportError:
+        from ocr_engines_det import RapidOcrParams, build_rapidocr_engine
+
+    return build_rapidocr_engine(
+        config.rapidocr_device,
+        RapidOcrParams(
+            text_score=config.rapidocr_text_score,
+            box_thresh=config.rapidocr_box_thresh,
+            thresh=config.rapidocr_thresh,
+            unclip_ratio=config.rapidocr_unclip_ratio,
+            limit_side_len=config.rapidocr_limit_side_len,
+            use_rec=config.rapidocr_use_rec,
+        ),
+    )
+
+
+def _build_surya(config: PipelineConfig) -> OcrEngine:
+    try:
+        from .ocr_engines_det import build_surya_engine
+    except ImportError:
+        from ocr_engines_det import build_surya_engine
+
+    return build_surya_engine(config.surya_device, config.surya_min_confidence)
+
+
+def _build_onnxtr(config: PipelineConfig) -> OcrEngine:
+    try:
+        from .ocr_engines_det import OnnxTrParams, build_onnxtr_engine
+    except ImportError:
+        from ocr_engines_det import OnnxTrParams, build_onnxtr_engine
+
+    return build_onnxtr_engine(
+        config.onnxtr_device,
+        OnnxTrParams(
+            arch=config.onnxtr_arch,
+            bin_thresh=config.onnxtr_bin_thresh,
+            box_thresh=config.onnxtr_box_thresh,
+            unclip_ratio=config.onnxtr_unclip_ratio,
+        ),
+    )
+
+
+def _build_vlm(config: PipelineConfig) -> OcrEngine:
+    try:
+        from .ocr_engines_vlm import VlmParams, build_vlm_engine
+    except ImportError:
+        from ocr_engines_vlm import VlmParams, build_vlm_engine
+
+    return build_vlm_engine(
+        VlmParams(
+            model=config.vlm_model,
+            base_url=config.vlm_base_url,
+            api_key_env=config.vlm_api_key_env,
+            prompt=config.vlm_prompt,
+            response_format=config.vlm_response_format,
+            coord_space=config.vlm_coord_space,
+            box_dilate_px=config.vlm_box_dilate_px,
+            max_side_px=config.vlm_max_side_px,
+            timeout_s=config.vlm_timeout_s,
+            confidence=config.vlm_confidence,
+        )
+    )
+
+
+# A registry rather than an if/else chain, so adding a backend is one entry and
+# the assertion below catches a name declared in OCR_ENGINE_NAMES but never
+# wired up — which would otherwise surface as a confusing KeyError at run time.
+OCR_ENGINES: dict[str, Callable[[PipelineConfig], OcrEngine]] = {
+    "easyocr": _build_easyocr,
+    "paddleocr": _build_paddleocr,
+    "rapidocr": _build_rapidocr,
+    "surya": _build_surya,
+    "onnxtr": _build_onnxtr,
+    "vlm": _build_vlm,
+}
+assert set(OCR_ENGINES) | {"ensemble"} == OCR_ENGINE_NAMES
+
+
+def build_ocr_engine(logger: PipelineEventLogger, config: PipelineConfig) -> OcrEngine:
+    name = config.ocr_engine
+    if name == "ensemble":
+        if not config.ensemble_engines:
+            raise ValueError(
+                "ocr_engine = 'ensemble' requires a non-empty ensemble_engines list"
+            )
+        floors = config.ensemble_min_confidences or [0.0] * len(config.ensemble_engines)
+        members: list[EnsembleMember] = []
+        for member_name, floor in zip(config.ensemble_engines, floors):
+            logger.loading_model(member_name)
+            members.append(
+                EnsembleMember(engine=OCR_ENGINES[member_name](config), min_confidence=floor)
+            )
+            logger.model_loaded(member_name)
+        engine = EnsembleOcrEngine(members, fail_mode=config.ensemble_fail_mode)
+        if config.ocr_min_confidence > 0.0:
+            _logger.warning(
+                "ocr_min_confidence=%.2f applies across ensemble members whose "
+                "confidence scales are not comparable (a recognition softmax, a "
+                "detector box score, a constant) — prefer ensemble_min_confidences",
+                config.ocr_min_confidence,
+            )
+        logger.model_loaded(engine.name)
+        return engine
+
+    builder = OCR_ENGINES.get(name)
+    if builder is None:
+        raise ValueError(
+            f"Unknown ocr_engine '{name}'. Valid values: {sorted(OCR_ENGINE_NAMES)}"
+        )
+    logger.loading_model(name)
+    engine = builder(config)
+    logger.model_loaded(name)
     return engine
+
+
+def build_preprocess_params(config: PipelineConfig) -> PreprocessParams:
+    return PreprocessParams(
+        clahe_clip_limit=config.clahe_clip_limit,
+        clahe_tile_grid_size=config.clahe_tile_grid_size,
+        clahe_tile_px=config.clahe_tile_px,
+        morph_kernel_px=config.morph_kernel_px,
+        stretch_low_pct=config.stretch_low_pct,
+        stretch_high_pct=config.stretch_high_pct,
+        gamma=config.preprocess_gamma,
+        unsharp_sigma=config.unsharp_sigma,
+        unsharp_amount=config.unsharp_amount,
+    )
 
 
 def build_deidentifier(
@@ -440,6 +748,8 @@ def build_deidentifier(
     params = DeidentifierParams(
         merge_distance_px=config.merge_distance_px,
         max_box_area_px=config.max_box_area_px,
+        max_box_area_ratio=config.max_box_area_ratio,
+        ellipse_enabled=config.ellipse_enabled,
         center_ellipse_axes_ratio=(
             config.ellipse_axis_x_ratio,
             config.ellipse_axis_y_ratio,
@@ -449,28 +759,42 @@ def build_deidentifier(
         min_confidence=config.ocr_min_confidence,
         redaction_mode=config.redaction_mode,
     )
-    strategy = None
+    strategy: ResolutionStrategy = FullImageStrategy()
     if config.resolution_strategy == "tiled":
         strategy = TiledStrategy(
             tile_size_px=config.tile_size_px,
             tile_overlap_px=config.tile_overlap_px,
             dedupe_containment=config.tile_dedupe_iou,
         )
+    if config.ocr_upscale_factor > 1.0:
+        # Wraps whatever strategy we just built, so upscale composes with
+        # tiling and the enlarged array never escapes into the Deidentifier.
+        strategy = UpscaleStrategy(
+            strategy,
+            factor=config.ocr_upscale_factor,
+            interpolation=config.ocr_upscale_interpolation,
+        )
     classifier = build_classifier(config.text_filter, config.short_text_max_chars)
+
+    preprocess_params = build_preprocess_params(config)
     preprocess = None
     if config.preprocess_steps:
         preprocess = partial(
-            apply_chain,
-            steps=list(config.preprocess_steps),
-            clahe_clip_limit=config.clahe_clip_limit,
-            clahe_tile_grid_size=config.clahe_tile_grid_size,
+            apply_chain, steps=list(config.preprocess_steps), params=preprocess_params
         )
+    preprocess_variants = None
+    if config.preprocess_variants:
+        preprocess_variants = [
+            partial(apply_chain, steps=list(steps), params=preprocess_params)
+            for steps in config.preprocess_variants
+        ]
     return Deidentifier(
         engine=engine,
         params=params,
         strategy=strategy,
         classifier=classifier,
         preprocess=preprocess,
+        preprocess_variants=preprocess_variants,
         dual_pass_invert=config.ocr_dual_pass_invert,
     )
 
